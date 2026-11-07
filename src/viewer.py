@@ -7,6 +7,7 @@ Controls:
     click the minimap      jump to that spot
     click an agent         select it and see its stats
     F                      camera follows the selected agent
+    V                      show what the selected agent sees
     + / -                  speed up / slow down
     SPACE                  pause / resume
     M                      show / hide minimap
@@ -23,6 +24,7 @@ from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites,
                          animal_sprites, WOLF_EYE, disaster_sprites, farm_sprites)
 from src.world import FARMLAND, CROP_GROW_TICKS
 from src.agents import ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE
+from src.observe import observe, CH, VIEW_SIZE, TERRAIN_ORDER
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
 from src.agents import ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE
@@ -62,10 +64,12 @@ HELP_LINES = [
     "click minimap   jump there",
     "click agent     select it",
     "F               follow selected",
+    "V               agent's eyes",
     "+ / -           speed",
     "SPACE           pause",
     "M               minimap",
     "R               new world",
+    "T               turbo (training)",
     "H               close help",
     "ESC             quit",
 ]
@@ -99,6 +103,12 @@ class Viewer:
         self.farm = {size: farm_sprites(size) for size in ZOOMS}
         self.hit_marks = []      # [x, y, frames left] red slashes where hits landed
         self.heart_marks = []    # [x, y, frames left] hearts where a child was conceived
+        self.show_eyes = False
+        # Training mode (set by train.py)
+        self.training = False
+        self.turbo = False         # T: stop drawing so training runs at full speed
+        self.training_info = []    # lines of text shown in the training panel
+        self.new_world_maker = lambda: Simulation(size=self.world.size)
         self.flash = 0           # frames of lightning flash left
         self.rain = np.random.default_rng(1).random((160, 2))   # raindrop positions
         self.zoom = START_ZOOM
@@ -465,7 +475,8 @@ class Viewer:
         if (w.fire > 0).any():
             x = self.text("FIRE", x + 14, (255, 140, 40))
 
-        status = "PAUSED" if self.paused else f"x{SPEEDS[self.speed_index]}"
+        speed = "MAX" if self.training and self.speed_index == len(SPEEDS) - 1 else f"x{SPEEDS[self.speed_index]}"
+        status = "PAUSED" if self.paused else speed
         right = f"{status}   H: help"
         label = self.font.render(right, False, HUD_TEXT)
         self.screen.blit(label, (WINDOW_W - label.get_width() - 12, 8))
@@ -485,6 +496,50 @@ class Viewer:
             label = self.small_font.render(f"{name} {an.count(kind)}", False, HUD_TEXT)
             self.screen.blit(label, (box.x + 28, y + 2))
 
+    # Plain colours for the debug view. The brain itself gets no colours at all,
+    # just "channel number 14 is on"; these colours only help us humans read it.
+    EYE_TERRAIN = [(90, 150, 70), (40, 100, 50), (120, 120, 128), (60, 130, 210),
+                   (70, 110, 140), (40, 30, 30), (30, 60, 140), (80, 60, 60), (130, 90, 55)]
+    EYE_MARKS = [("red berries", (220, 50, 60)), ("purple berries", (190, 90, 255)),
+                 ("crop ripe", (240, 205, 80)), ("crop growing", (110, 190, 80)),
+                 ("pile", (200, 150, 100)), ("ash", (70, 66, 64)), ("flood", (90, 150, 230)),
+                 ("fire", (255, 140, 40)), ("rabbit", (200, 180, 150)), ("deer", (180, 120, 60)),
+                 ("wolf", (160, 160, 170)), ("bear", (100, 66, 40)), ("child", (255, 255, 255)),
+                 ("woman", (240, 100, 120)), ("man", (90, 130, 230))]
+
+    def draw_eyes(self):
+        """Debug panel: the selected agent's view, exactly as the brain receives it."""
+        i = self.selected
+        if not self.show_eyes or i is None or not self.sim.agents.alive[i]:
+            return
+        view, _ = observe(self.sim, [i])
+        v = view[0]
+        cell = 10
+        size = VIEW_SIZE * cell
+        box = pygame.Rect(WINDOW_W - size - 20, HUD_HEIGHT + 120, size + 12, size + 34)
+        pygame.draw.rect(self.screen, HUD_BG, box)
+        pygame.draw.rect(self.screen, (60, 52, 70), box, 2)
+        label = self.small_font.render(f"What #{i} sees", False, HUD_TEXT)
+        self.screen.blit(label, (box.x + 6, box.y + 4))
+        ox, oy = box.x + 6, box.y + 26
+        for ty in range(VIEW_SIZE):
+            for tx in range(VIEW_SIZE):
+                rect = (ox + tx * cell, oy + ty * cell, cell, cell)
+                if not v[CH["visible"], ty, tx]:
+                    pygame.draw.rect(self.screen, (12, 10, 16), rect)   # can't see
+                    continue
+                colour = (0, 0, 0)
+                for k in range(len(TERRAIN_ORDER)):
+                    if v[k, ty, tx]:
+                        colour = self.EYE_TERRAIN[k]
+                pygame.draw.rect(self.screen, colour, rect)
+                for name, mark in self.EYE_MARKS:
+                    if v[CH[name], ty, tx] > 0:
+                        pygame.draw.rect(self.screen, mark, (rect[0] + 2, rect[1] + 2, cell - 4, cell - 4))
+                        break
+        c = VIEW_SIZE // 2
+        pygame.draw.rect(self.screen, (255, 230, 90), (ox + c * cell, oy + c * cell, cell, cell), 1)
+
     def draw_help(self):
         line_h = 20
         box = pygame.Rect(16, HUD_HEIGHT + 16, 300, len(HELP_LINES) * line_h + 20)
@@ -503,16 +558,7 @@ class Viewer:
         return x + label.get_width()
 
     def draw(self):
-        self.draw_map()
-        if self.show_minimap:
-            self.draw_minimap()
-        self.draw_census()
-        self.draw_events()
-        self.draw_agent_panel()
-        if self.show_help:
-            self.draw_help()
-        self.draw_hud()
-        pygame.display.flip()
+        self.frame(0)
 
     # ---------- controls ----------
     def handle_events(self):
@@ -533,8 +579,12 @@ class Viewer:
                     self.show_minimap = not self.show_minimap
                 if event.key == pygame.K_h:
                     self.show_help = not self.show_help
-                if event.key == pygame.K_r:
-                    self.set_sim(Simulation(size=self.world.size))
+                if event.key == pygame.K_r and not self.training:
+                    self.set_sim(self.new_world_maker())
+                if event.key == pygame.K_t and self.training:
+                    self.turbo = not self.turbo
+                if event.key == pygame.K_v:
+                    self.show_eyes = not self.show_eyes
                 if event.key == pygame.K_f and self.selected is not None:
                     self.following = not self.following
 
@@ -577,24 +627,71 @@ class Viewer:
             self.cam_y += dy * PAN_SPEED * dt
             self.clamp_camera()
 
+    def after_tick(self):
+        """Collect hit and heart marks from the tick that just happened."""
+        self.hit_marks += [[x, y, 12] for x, y in self.sim.agents.hits]
+        self.heart_marks += [[x, y, 40] for x, y in self.sim.agents.hearts]
+
+    def frame(self, dt):
+        """Everything for one screen update except advancing the world."""
+        self.pan_with_keys(dt)
+        if self.following and self.selected is not None:
+            a = self.sim.agents
+            self.center_on(a.x[self.selected] + 0.5, a.y[self.selected] + 0.5)
+        if self.turbo:
+            self.draw_turbo()
+        else:
+            self.draw_map()
+            if self.show_minimap:
+                self.draw_minimap()
+            self.draw_census()
+            self.draw_events()
+            self.draw_agent_panel()
+            self.draw_eyes()
+            if self.show_help:
+                self.draw_help()
+            self.draw_training()
+            self.draw_hud()
+        pygame.display.flip()
+
+    def draw_training(self):
+        """Training progress panel (only while training)."""
+        if not self.training_info:
+            return
+        line_h = 20
+        width = 330
+        box = pygame.Rect(WINDOW_W - width - 180, HUD_HEIGHT + 8, width, len(self.training_info) * line_h + 12)
+        panel = pygame.Surface(box.size, pygame.SRCALPHA)
+        panel.fill((24, 20, 28, 215))
+        self.screen.blit(panel, box)
+        pygame.draw.rect(self.screen, (90, 70, 140), box, 2)
+        for row, line in enumerate(self.training_info):
+            colour = (200, 170, 255) if row == 0 else HUD_TEXT
+            label = self.small_font.render(line, False, colour)
+            self.screen.blit(label, (box.x + 10, box.y + 6 + row * line_h))
+
+    def draw_turbo(self):
+        """Plain screen shown in turbo mode: just the numbers, no world drawing."""
+        self.screen.fill((16, 14, 22))
+        lines = ["TURBO: training at full speed", "press T to watch again", ""] + self.training_info
+        for row, line in enumerate(lines):
+            colour = (200, 170, 255) if row == 0 else HUD_TEXT
+            label = self.font.render(line, False, colour)
+            self.screen.blit(label, (40, 60 + row * 28))
+
     def run(self):
-        # The screen redraws 60 times a second (smooth water and camera), but the
-        # world only advances at the chosen speed.
+        """Watch mode: the screen redraws 60 times a second, and the world
+        advances at the chosen speed."""
         running = True
         tick_timer = 0.0
         while running:
             running = self.handle_events()
             dt = self.clock.tick(60) / 1000
-            self.pan_with_keys(dt)
             if not self.paused:
                 tick_timer += dt * SPEEDS[self.speed_index]
                 while tick_timer >= 1:
                     self.sim.step()
-                    self.hit_marks += [[x, y, 12] for x, y in self.sim.agents.hits]
-                    self.heart_marks += [[x, y, 40] for x, y in self.sim.agents.hearts]
+                    self.after_tick()
                     tick_timer -= 1
-            if self.following and self.selected is not None:
-                a = self.sim.agents
-                self.center_on(a.x[self.selected] + 0.5, a.y[self.selected] + 0.5)
-            self.draw()
+            self.frame(dt)
         pygame.quit()

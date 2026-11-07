@@ -21,14 +21,18 @@ class Simulation:
         self.disasters = Disasters(self.world, self.rng)
         self.deaths = Counter()   # cause of death -> how many
         self.discoveries = []     # (tick, message) the first time each activity happens
+        self.policy = None        # a function(sim) -> actions; None means random
 
     def choose_actions(self):
-        """For now every agent picks a completely random action.
-        In phase 10 this is replaced by the learning "brain"."""
+        """Ask the brain (if one is plugged in), otherwise act randomly."""
+        if self.policy is not None:
+            return self.policy(self)
         return self.rng.integers(0, NUM_ACTIONS, self.agents.count)
 
-    def step(self):
-        actions = self.choose_actions()
+    def step(self, actions=None):
+        """Advance one tick. The trainer passes in the actions it chose itself."""
+        if actions is None:
+            actions = self.choose_actions()
         self.disasters.step()
         self.agents.step(actions, self.disasters, self.animals)
         self.animals.step(self.agents)

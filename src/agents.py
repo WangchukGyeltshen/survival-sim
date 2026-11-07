@@ -176,6 +176,8 @@ class Agents:
         self.father = np.full(n, -1, dtype=np.int32)
 
         self.health = np.zeros(n)
+        self.prev_health = np.zeros(n)
+        self.pain = np.zeros(n)                      # health lost this tick (felt as pain)
         self.food = np.zeros(n)
         self.water = np.zeros(n)
         self.energy = np.zeros(n)
@@ -202,11 +204,13 @@ class Agents:
         self.hits = []            # (x, y) of every hit this tick, for the viewer
         self.hearts = []          # (x, y) of every conception this tick, for the viewer
         self.births = 0
+        self.new_parents = []     # (mother, father) of every child born this tick
 
         self.last_action = np.zeros(n, dtype=np.int8)
         self.last_hurt_by = np.zeros(n, dtype=np.int8)   # what last damaged them
         self.cause_of_death = np.zeros(n, dtype=np.int8)
         self.death_tick = np.full(n, -1)
+        self.spawn_tick = np.zeros(n, dtype=np.int64)  # when they appeared in this world
 
         # The first people: young adults (1 to 2 years old) on random grass or forest,
         # half male and half female, with slightly different genes
@@ -239,7 +243,8 @@ class Agents:
         self.lifespan[i] = rng.integers(low * TICKS_PER_YEAR, high * TICKS_PER_YEAR)
         self.generation[i] = generation
         self.mother[i], self.father[i] = mother, father
-        self.health[i] = MAX_STAT
+        self.health[i] = self.prev_health[i] = MAX_STAT
+        self.pain[i] = 0
         self.food[i] = food
         self.water[i] = rng.uniform(60, 100)
         self.energy[i] = rng.uniform(60, 100)
@@ -262,6 +267,7 @@ class Agents:
         self.last_hurt_by[i] = ALIVE
         self.cause_of_death[i] = ALIVE
         self.death_tick[i] = -1
+        self.spawn_tick[i] = self.world.tick
         return i
 
     def is_adult(self, i):
@@ -283,6 +289,8 @@ class Agents:
         a = np.asarray(actions)
         alive = self.alive
         self.last_action[alive] = a[alive]
+        self.prev_health[:] = self.health
+        self.new_parents = []
 
         # Exhausted agents (no energy) cannot move, so their move becomes rest
         tired = self.energy <= 0
@@ -474,6 +482,7 @@ class Agents:
                 self.children[m] += 1
             self.births += 1
             self.counts["child born"] += 1
+            self.new_parents.append((int(f), int(m)))
         if self.rng.random() < CHILDBIRTH_RISK:
             self.hurt(f, INSTANT_DEATH, CHILDBIRTH)
 
@@ -666,6 +675,7 @@ class Agents:
 
     def resolve_deaths(self):
         """Agents with no health left die. Returns which agents died this tick."""
+        self.pain = np.maximum(self.prev_health - self.health, 0)
         dead = self.alive & (self.health <= 0)
         for i in np.flatnonzero(dead):
             self.drop_everything(i)

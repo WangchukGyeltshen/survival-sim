@@ -8,5 +8,8 @@ See `docs/DESIGN.md` for the full design.
 ```
 python -m venv .venv
 .venv\Scripts\Activate.ps1
+pip install torch --index-url https://download.pytorch.org/whl/cu128
 pip install -r requirements.txt
 ```
+
+The first install line gets the GPU version of PyTorch (the normal one is CPU only).

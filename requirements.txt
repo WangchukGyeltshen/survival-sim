@@ -1,2 +1,5 @@
 numpy
 pygame
+# PyTorch with GPU support must be installed from PyTorch's own server:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu128
+torch
