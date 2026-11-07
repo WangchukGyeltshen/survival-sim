@@ -16,7 +16,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from src.world import GRASS, FOREST, TICKS_PER_DAY, DAYS_PER_YEAR
-from src.agents import ANIMAL_WALKABLE, KILLED_BY_WOLF, KILLED_BY_BEAR
+from src.agents import ANIMAL_WALKABLE, KILLED_BY_WOLF, KILLED_BY_BEAR, KICKED_BY_DEER
 
 RABBIT = 0
 DEER = 1
@@ -71,6 +71,9 @@ WOLF_DAY_ATTACKS_PEOPLE = 30   # in daytime, only attack people when this hungry
 BEAR_HOME_RADIUS = 6      # bears wander this far from home
 BEAR_ANGER_RANGE = 2      # bears charge people this close
 BEAR_BERRY_FOOD = 15
+MEAT_PIECE = 10           # one piece of meat an agent carries = 10 food points of the animal
+DEER_KICK_CHANCE = 0.4    # a hurt deer may kick back
+DEER_KICK = 8
 
 
 class Animals:
@@ -181,6 +184,27 @@ class Animals:
 
     def die(self, i):
         self.alive[i] = False
+
+    @staticmethod
+    def name(kind):
+        return SPECIES_NAMES[kind]
+
+    def hit_by_agent(self, j, damage, attacker, agents):
+        """An agent hits animal j. Wolves and bears fight back hard, deer may kick.
+        Returns pieces of meat if the animal died, else 0."""
+        kind = self.species[j]
+        self.health[j] -= damage
+        if self.health[j] <= 0:
+            self.die(j)
+            return max(1, int(round(SPECIES[kind].meat / MEAT_PIECE)))
+        if kind == WOLF:
+            agents.hurt(attacker, SPECIES[WOLF].damage, KILLED_BY_WOLF)
+            self.food[j] = min(self.food[j], WOLF_HUNGRY - 1)   # now it's hunting you
+        elif kind == BEAR:
+            agents.hurt(attacker, SPECIES[BEAR].damage, KILLED_BY_BEAR)
+        elif kind == DEER and self.rng.random() < DEER_KICK_CHANCE:
+            agents.hurt(attacker, DEER_KICK, KICKED_BY_DEER)
+        return 0
 
     # ---------- one tick ----------
     def step(self, agents):

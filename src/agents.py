@@ -5,10 +5,12 @@ All agents are stored together in arrays, one slot per agent. For example
 update hundreds of agents at once, which matters later when training.
 """
 
+from collections import Counter
+
 import numpy as np
 
 from src.world import (GRASS, FOREST, ROCK, RIVER, POND, CAVE, DEEP_WATER,
-                       CLIFF, FARMLAND, TICKS_PER_DAY, DAYS_PER_YEAR)
+                       CLIFF, FARMLAND, TICKS_PER_DAY, DAYS_PER_YEAR, CROP_GROW_TICKS)
 
 # ---------- actions ----------
 # Each tick every agent picks one of these numbers.
@@ -19,8 +21,14 @@ LEFT = 3
 RIGHT = 4
 EAT = 5
 DRINK = 6
-NUM_ACTIONS = 7
-ACTION_NAMES = ["rest", "up", "down", "left", "right", "eat", "drink"]
+PICK_UP = 7
+PLANT = 8
+CRAFT = 9
+ATTACK_ANIMAL = 10
+ATTACK_PERSON = 11
+NUM_ACTIONS = 12
+ACTION_NAMES = ["rest", "up", "down", "left", "right", "eat", "drink", "pick up",
+                "plant", "craft", "attack animal", "attack person"]
 MOVES = {UP: (0, -1), DOWN: (0, 1), LEFT: (-1, 0), RIGHT: (1, 0)}
 
 MALE = 0
@@ -67,6 +75,24 @@ HUDDLE_SHELTER = 0.2      # each agent next to you cuts heat loss by 20%...
 MIN_HUDDLE = 0.4          # ...down to at most 40% of normal
 COLD_DAMAGE = 0.4         # health lost per tick when warmth is empty
 
+# ---------- carrying ----------
+CARRY_LIMIT = {"berries": 5, "meat": 6, "seeds": 5, "sticks": 2, "stones": 2}
+ITEMS = list(CARRY_LIMIT)
+MEAT_FOOD = 15            # food from one piece of meat
+MEAT_SPOIL_CHANCE = 0.003 # per tick, carried meat may go bad (lose one piece)
+SEED_FROM_BERRY = 0.3     # chance eating a (safe) berry from a bush gives a seed
+SEED_FROM_CROP = 0.5      # chance eating a crop gives a seed
+CROP_FOOD = 25            # food from one serving of a ripe crop
+
+# ---------- weapons ----------
+HANDS, STICK, SHARP_STONE, SPEAR = 0, 1, 2, 3
+WEAPON_NAMES = ["hands", "stick", "sharp stone", "spear"]
+WEAPON_DAMAGE = [5, 9, 15, 25]
+WEAPON_RANGE = [1, 1, 1, 2]       # spears reach 2 tiles
+WEAPON_USES = [0, 20, 30, 40]     # hits before it breaks
+ATTACK_ENERGY = 0.5
+MISS_CHANCE = {0: 0.5, 1: 0.3}    # rabbits (0) and deer (1) often dodge
+
 # ---------- other dangers ----------
 POISON_FOOD = 5           # poisonous berries still fill you a little...
 POISON_DAMAGE = 35        # ...but hurt a lot
@@ -94,8 +120,11 @@ FLOOD = 10
 FIRE = 11
 LIGHTNING = 12
 OLD_AGE = 13
+KICKED_BY_DEER = 14
+KILLED_BY_PERSON = 15
 DEATH_CAUSES = ["alive", "starvation", "thirst", "wolf", "bear", "cold", "poison",
-                "sickness", "drowned", "fell", "flood", "fire", "lightning", "old age"]
+                "sickness", "drowned", "fell", "flood", "fire", "lightning", "old age",
+                "deer", "killed by person"]
 
 TICKS_PER_YEAR = TICKS_PER_DAY * DAYS_PER_YEAR
 
@@ -127,6 +156,16 @@ class Agents:
         low, high = LIFESPAN_YEARS
         self.lifespan = rng.integers(low * TICKS_PER_YEAR, high * TICKS_PER_YEAR, count)
 
+        # Inventory: how many of each item every agent carries
+        self.inv = {item: np.zeros(count, dtype=np.int32) for item in ITEMS}
+        self.inv_poison = np.zeros(count, dtype=np.int32)  # how many carried berries are poisonous
+        self.weapon = np.zeros(count, dtype=np.int8)       # HANDS, STICK, SHARP_STONE or SPEAR
+        self.weapon_uses = np.zeros(count, dtype=np.int32)
+        self.kills = np.zeros(count, dtype=np.int32)       # people this agent has killed
+
+        self.counts = Counter()   # how often things happen (hunts, crafts, plants...)
+        self.hits = []            # (x, y) of every hit this tick, for the viewer
+
         self.last_action = np.zeros(count, dtype=np.int8)
         self.last_hurt_by = np.zeros(count, dtype=np.int8)   # what last damaged them
         self.cause_of_death = np.zeros(count, dtype=np.int8)
@@ -141,7 +180,7 @@ class Agents:
         self.health[index] -= amount
         self.last_hurt_by[index] = cause
 
-    def step(self, actions, disasters):
+    def step(self, actions, disasters, animals):
         """Apply one action per agent and update their stats.
         Deaths are checked later in resolve_deaths(), after animals have acted."""
         world = self.world
@@ -175,17 +214,32 @@ class Agents:
         resting = alive & ((a == REST) | (np.isin(a, list(MOVES)) & tired))
         self.energy[resting] += REST_ENERGY
 
-        # ----- eating (one berry from the tile the agent stands on) -----
-        # Done one agent at a time so two agents can't eat the same last berry
-        for i in np.flatnonzero(alive & (a == EAT)):
-            y, x = self.y[i], self.x[i]
-            if world.berries[y, x] > 0:
-                world.berries[y, x] -= 1
-                if world.poison[y, x]:
-                    self.food[i] += POISON_FOOD
-                    self.hurt(i, POISON_DAMAGE, POISON)
-                else:
-                    self.food[i] += BERRY_FOOD
+        # ----- the other actions, one agent at a time (in random order, so
+        # nobody always gets the last berry or the first strike) -----
+        self.hits = []
+        order = np.flatnonzero(alive & (a >= EAT))
+        self.rng.shuffle(order)
+        for i in order:
+            if self.health[i] <= 0:
+                continue   # killed earlier this tick
+            act = a[i]
+            if act == EAT:
+                self.eat(i)
+            elif act == PICK_UP:
+                self.pick_up(i)
+            elif act == PLANT:
+                self.plant(i)
+            elif act == CRAFT:
+                self.craft(i)
+            elif act == ATTACK_ANIMAL:
+                self.attack_animal(i, animals)
+            elif act == ATTACK_PERSON:
+                self.attack_person(i)
+
+        # Carried meat slowly goes bad
+        has_meat = np.flatnonzero(alive & (self.inv["meat"] > 0))
+        spoils = has_meat[self.rng.random(len(has_meat)) < MEAT_SPOIL_CHANCE]
+        self.inv["meat"][spoils] -= 1
 
         # ----- drinking (standing on or next to water) -----
         drinking = np.flatnonzero(alive & (a == DRINK))
@@ -240,6 +294,166 @@ class Agents:
             np.clip(stat, 0, MAX_STAT, out=stat)
         np.clip(self.health, None, MAX_STAT, out=self.health)
 
+    # ================= actions =================
+    def eat(self, i):
+        """Eat from the tile (bush or ripe crop), otherwise something carried."""
+        w = self.world
+        y, x = self.y[i], self.x[i]
+        if w.berries[y, x] > 0:
+            w.berries[y, x] -= 1
+            if w.terrain[y, x] == FARMLAND:
+                self.food[i] += CROP_FOOD
+                self.give_seed(i, SEED_FROM_CROP)
+                self.counts["ate crop"] += 1
+            elif w.poison[y, x]:
+                self.food[i] += POISON_FOOD
+                self.hurt(i, POISON_DAMAGE, POISON)
+            else:
+                self.food[i] += BERRY_FOOD
+                self.give_seed(i, SEED_FROM_BERRY)
+        elif self.inv["meat"][i] > 0:
+            self.inv["meat"][i] -= 1
+            self.food[i] += MEAT_FOOD
+            self.counts["ate meat"] += 1
+        elif self.inv["berries"][i] > 0:
+            # Carried berries all look alike; a poisonous one may come out
+            poisoned = self.rng.random() < self.inv_poison[i] / self.inv["berries"][i]
+            self.inv["berries"][i] -= 1
+            if poisoned:
+                self.inv_poison[i] -= 1
+                self.food[i] += POISON_FOOD
+                self.hurt(i, POISON_DAMAGE, POISON)
+            else:
+                self.food[i] += BERRY_FOOD
+
+    def give_seed(self, i, chance):
+        if self.rng.random() < chance and self.inv["seeds"][i] < CARRY_LIMIT["seeds"]:
+            self.inv["seeds"][i] += 1
+
+    def room(self, i, item):
+        return CARRY_LIMIT[item] - self.inv[item][i]
+
+    def near_rock(self, i):
+        w = self.world
+        for ox, oy in ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)):
+            x, y = self.x[i] + ox, self.y[i] + oy
+            if 0 <= x < w.size and 0 <= y < w.size and w.terrain[y, x] in (ROCK, CLIFF, CAVE):
+                return True
+        return False
+
+    def pick_up(self, i):
+        """Pick up whatever is here, in this order: a pile of dropped things,
+        a ripe crop, a berry, a stick (forest), a stone (next to rock)."""
+        w = self.world
+        x, y = int(self.x[i]), int(self.y[i])
+        if (x, y) in w.piles:
+            self.take_pile(i, x, y)
+        elif w.berries[y, x] > 0 and self.room(i, "berries") > 0:
+            w.berries[y, x] -= 1
+            self.inv["berries"][i] += 1
+            if w.poison[y, x]:
+                self.inv_poison[i] += 1
+            if w.terrain[y, x] == FARMLAND:
+                self.counts["harvested crop"] += 1
+        elif w.terrain[y, x] == FOREST:
+            if self.weapon[i] == HANDS:
+                self.weapon[i], self.weapon_uses[i] = STICK, WEAPON_USES[STICK]
+                self.counts["picked up stick"] += 1
+            elif self.room(i, "sticks") > 0:
+                self.inv["sticks"][i] += 1
+                self.counts["picked up stick"] += 1
+        elif self.near_rock(i) and self.room(i, "stones") > 0:
+            self.inv["stones"][i] += 1
+            self.counts["picked up stone"] += 1
+
+    def take_pile(self, i, x, y):
+        pile = self.world.piles[(x, y)]
+        for item in ITEMS:
+            n = min(pile.get(item, 0), self.room(i, item))
+            self.inv[item][i] += n
+            pile[item] = pile.get(item, 0) - n
+            if item == "berries" and n:
+                bad = min(pile.get("poison", 0), n)
+                self.inv_poison[i] += bad
+                pile["poison"] = pile.get("poison", 0) - bad
+        if pile.get("weapon", HANDS) > self.weapon[i]:
+            # Swap for the better weapon, leaving the old one behind
+            old, old_uses = int(self.weapon[i]), int(self.weapon_uses[i])
+            self.weapon[i], self.weapon_uses[i] = pile["weapon"], pile["weapon_uses"]
+            pile["weapon"], pile["weapon_uses"] = old, old_uses
+        self.counts["took from pile"] += 1
+        self.world.clean_pile(x, y)
+
+    def plant(self, i):
+        w = self.world
+        y, x = self.y[i], self.x[i]
+        if self.inv["seeds"][i] > 0 and w.terrain[y, x] == GRASS and w.fire[y, x] == 0:
+            self.inv["seeds"][i] -= 1
+            w.terrain[y, x] = FARMLAND
+            w.crop[y, x] = CROP_GROW_TICKS
+            w.berries[y, x] = 0
+            self.counts["planted seed"] += 1
+
+    def craft(self, i):
+        """Sharp stone + stick = spear. A stone knocked against rock = sharp stone."""
+        if self.weapon[i] == SHARP_STONE and self.inv["sticks"][i] > 0:
+            self.inv["sticks"][i] -= 1
+            self.weapon[i], self.weapon_uses[i] = SPEAR, WEAPON_USES[SPEAR]
+            self.counts["crafted spear"] += 1
+        elif self.weapon[i] < SHARP_STONE and self.inv["stones"][i] > 0 and self.near_rock(i):
+            self.inv["stones"][i] -= 1
+            if self.weapon[i] == STICK and self.room(i, "sticks") > 0:
+                self.inv["sticks"][i] += 1   # keep the stick for later
+            self.weapon[i], self.weapon_uses[i] = SHARP_STONE, WEAPON_USES[SHARP_STONE]
+            self.counts["crafted sharp stone"] += 1
+
+    def strike(self, i):
+        """Damage this agent deals now, and wear down its weapon."""
+        weapon = self.weapon[i]
+        self.energy[i] -= ATTACK_ENERGY
+        damage = WEAPON_DAMAGE[weapon]
+        if weapon != HANDS:
+            self.weapon_uses[i] -= 1
+            if self.weapon_uses[i] <= 0:
+                self.weapon[i] = HANDS
+                self.counts["weapon broke"] += 1
+        return damage
+
+    def attack_animal(self, i, animals):
+        reach = WEAPON_RANGE[self.weapon[i]]
+        d = np.abs(animals.x - self.x[i]) + np.abs(animals.y - self.y[i])
+        targets = np.flatnonzero(animals.alive & (d <= reach))
+        if len(targets) == 0:
+            return
+        j = targets[np.argmin(d[targets])]
+        kind = int(animals.species[j])
+        damage = self.strike(i)
+        if self.rng.random() < MISS_CHANCE.get(kind, 0):
+            return   # it dodged
+        self.hits.append((int(animals.x[j]), int(animals.y[j])))
+        meat = animals.hit_by_agent(j, damage, i, self)
+        if meat:
+            self.counts[f"hunted {animals.name(kind)}"] += 1
+            take = min(meat, self.room(i, "meat"))
+            self.inv["meat"][i] += take
+            if meat > take:
+                self.world.drop(int(self.x[i]), int(self.y[i]), {"meat": meat - take})
+
+    def attack_person(self, i):
+        reach = WEAPON_RANGE[self.weapon[i]]
+        d = np.abs(self.x - self.x[i]) + np.abs(self.y - self.y[i])
+        targets = np.flatnonzero(self.alive & (self.health > 0) & (d <= reach))
+        targets = targets[targets != i]
+        if len(targets) == 0:
+            return
+        j = self.rng.choice(targets[d[targets] == d[targets].min()])
+        self.hurt(j, self.strike(i), KILLED_BY_PERSON)
+        self.hits.append((int(self.x[j]), int(self.y[j])))
+        self.counts["attacked person"] += 1
+        if self.health[j] <= 0:
+            self.kills[i] += 1
+            self.counts["killed person"] += 1
+
     def update_warmth(self, alive, disasters):
         world = self.world
         time = "night" if world.is_night else "day"
@@ -268,9 +482,26 @@ class Agents:
     def resolve_deaths(self):
         """Agents with no health left die. Returns which agents died this tick."""
         dead = self.alive & (self.health <= 0)
+        for i in np.flatnonzero(dead):
+            self.drop_everything(i)
         if dead.any():
             self.health[dead] = 0
             self.cause_of_death[dead] = self.last_hurt_by[dead]
             self.death_tick[dead] = self.world.tick
             self.alive[dead] = False
         return dead
+
+    def drop_everything(self, i):
+        """A dead agent leaves everything it carried on the ground."""
+        items = {item: int(self.inv[item][i]) for item in ITEMS if self.inv[item][i]}
+        if self.inv_poison[i]:
+            items["poison"] = int(self.inv_poison[i])
+        if self.weapon[i] != HANDS:
+            items["weapon"] = int(self.weapon[i])
+            items["weapon_uses"] = int(self.weapon_uses[i])
+        if items:
+            self.world.drop(int(self.x[i]), int(self.y[i]), items)
+        for item in ITEMS:
+            self.inv[item][i] = 0
+        self.inv_poison[i] = 0
+        self.weapon[i] = HANDS

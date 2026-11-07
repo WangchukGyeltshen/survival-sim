@@ -20,7 +20,9 @@ import pygame
 
 from src.world import POND, TICKS_PER_DAY, DAYLIGHT_TICKS
 from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites,
-                         animal_sprites, WOLF_EYE, disaster_sprites)
+                         animal_sprites, WOLF_EYE, disaster_sprites, farm_sprites)
+from src.world import FARMLAND, CROP_GROW_TICKS
+from src.agents import ITEMS, WEAPON_NAMES, HANDS
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
 from src.agents import ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE
@@ -94,6 +96,8 @@ class Viewer:
         self.people = {size: agent_sprites(size) for size in ZOOMS}
         self.beasts = {size: animal_sprites(size) for size in ZOOMS}
         self.hazards = {size: disaster_sprites(size) for size in ZOOMS}
+        self.farm = {size: farm_sprites(size) for size in ZOOMS}
+        self.hit_marks = []      # [x, y, frames left] red slashes where hits landed
         self.flash = 0           # frames of lightning flash left
         self.rain = np.random.default_rng(1).random((160, 2))   # raindrop positions
         self.zoom = START_ZOOM
@@ -166,6 +170,7 @@ class Viewer:
 
         self.screen.set_clip((0, HUD_HEIGHT, WINDOW_W, WINDOW_H))
         ash, fire_frames, flood = self.hazards[tile]
+        crops, pile_img, _ = self.farm[tile]
         jobs, overlays, fires = [], [], []
         berry_tiles = []
         for y in range(first_y, last_y):
@@ -178,8 +183,16 @@ class Viewer:
                     jobs.append((ash, (px, py)))
                 else:
                     jobs.append((sheet.get(kind, self.variants[y, x], winter, water_frame), (px, py)))
-                if w.berries[y, x]:
+                if kind == FARMLAND:
+                    if w.berries[y, x]:
+                        overlays.append((crops[2], (px, py)))          # ripe
+                    else:
+                        stage = 0 if w.crop[y, x] > CROP_GROW_TICKS // 2 else 1
+                        overlays.append((crops[stage], (px, py)))
+                elif w.berries[y, x]:
                     berry_tiles.append((px, py, int(w.berries[y, x]), bool(w.poison[y, x])))
+                if (x, y) in w.piles:
+                    overlays.append((pile_img, (px, py)))
                 if w.flood[y, x] > 0:
                     overlays.append((flood, (px, py)))
                 if w.fire[y, x] > 0:
@@ -227,11 +240,16 @@ class Viewer:
             self.flash -= 1
 
     def draw_events(self):
-        """Recent disaster messages, top-left under the info bar."""
+        """Recent disaster messages (yellow) and first discoveries (green),
+        top-left under the info bar."""
         tick = self.world.tick
-        recent = [(t, m) for t, m in self.sim.disasters.events[-4:] if tick - t < 150]
-        for row, (t, message) in enumerate(recent):
-            label = self.small_font.render(message, False, (255, 214, 120))
+        events = [(t, m, (255, 214, 120)) for t, m in self.sim.disasters.events[-4:]]
+        events += [(t, f"Day {t // TICKS_PER_DAY}: {m}", (140, 230, 120))
+                   for t, m in self.sim.discoveries[-4:]]
+        events.sort(key=lambda e: e[0])
+        recent = [e for e in events if tick - e[0] < 300][-5:]
+        for row, (t, message, colour) in enumerate(recent):
+            label = self.small_font.render(message, False, colour)
             box = label.get_rect(topleft=(10, HUD_HEIGHT + 10 + row * 24)).inflate(12, 6)
             panel = pygame.Surface(box.size, pygame.SRCALPHA)
             panel.fill((24, 20, 28, 200))
@@ -271,8 +289,19 @@ class Viewer:
         for i in np.flatnonzero(animals_in_view):
             self.screen.blit(beasts[an.species[i]], self.to_screen(an.x[i], an.y[i]))
 
+        weapons = self.farm[tile][2]
         for i in np.flatnonzero(a.alive & in_view):
-            self.screen.blit(people[a.sex[i]], self.to_screen(a.x[i], a.y[i]))
+            pos = self.to_screen(a.x[i], a.y[i])
+            self.screen.blit(people[a.sex[i]], pos)
+            if a.weapon[i] != HANDS:
+                self.screen.blit(weapons[a.weapon[i]], pos)
+
+        # Red slashes where hits landed
+        for mark in self.hit_marks:
+            px, py = self.to_screen(mark[0], mark[1])
+            pygame.draw.line(self.screen, (240, 40, 40), (px + 2, py + 2), (px + tile - 3, py + tile - 3), 3)
+            mark[2] -= 1
+        self.hit_marks = [m for m in self.hit_marks if m[2] > 0]
 
         if self.selected is not None and a.alive[self.selected]:
             px, py = self.to_screen(a.x[self.selected], a.y[self.selected])
@@ -296,8 +325,8 @@ class Viewer:
         if i is None:
             return
         a = self.sim.agents
-        height = 168 if a.alive[i] else 56
-        box = pygame.Rect(10, HUD_HEIGHT + WINDOW_H - height - 10, 250, height)
+        height = 208 if a.alive[i] else 56
+        box = pygame.Rect(10, HUD_HEIGHT + WINDOW_H - height - 10, 380, height)
         panel = pygame.Surface(box.size, pygame.SRCALPHA)
         panel.fill((24, 20, 28, 225))
         self.screen.blit(panel, box)
@@ -329,6 +358,15 @@ class Viewer:
         follow = "  [following]" if self.following else ""
         label = self.small_font.render(f"doing: {doing}{follow}", False, HUD_TEXT)
         self.screen.blit(label, (box.x + 10, y + 4))
+
+        weapon = WEAPON_NAMES[a.weapon[i]]
+        if a.weapon[i] != HANDS:
+            weapon += f" ({a.weapon_uses[i]} uses)"
+        label = self.small_font.render(f"weapon: {weapon}", False, HUD_TEXT)
+        self.screen.blit(label, (box.x + 10, y + 24))
+        carried = ", ".join(f"{a.inv[item][i]} {item}" for item in ITEMS if a.inv[item][i])
+        label = self.small_font.render(f"carry: {carried or 'nothing'}", False, HUD_TEXT)
+        self.screen.blit(label, (box.x + 10, y + 44))
 
     def build_minimap(self):
         w = self.world
@@ -529,6 +567,7 @@ class Viewer:
                 tick_timer += dt * SPEEDS[self.speed_index]
                 while tick_timer >= 1:
                     self.sim.step()
+                    self.hit_marks += [[x, y, 12] for x, y in self.sim.agents.hits]
                     tick_timer -= 1
             if self.following and self.selected is not None:
                 a = self.sim.agents

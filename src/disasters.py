@@ -107,7 +107,7 @@ class Disasters:
         near = neighbours_of(burning) & fuel
         roll = self.rng.random(w.fire.shape)
         chance = np.where(w.terrain == FOREST, SPREAD_FOREST,
-                          np.where(w.terrain == GRASS, SPREAD_GRASS, 0.0))
+                          np.where(np.isin(w.terrain, (GRASS, FARMLAND)), SPREAD_GRASS, 0.0))
         if rain:
             chance = chance / 4
         catches = near & (roll < chance)
@@ -120,6 +120,12 @@ class Disasters:
         w.burnt[done & (w.terrain == FOREST)] = BURNT_FOREST_TICKS
         w.burnt[done & (w.terrain != FOREST)] = BURNT_GRASS_TICKS
         w.berries[burning] = 0
+        # Crops burn too
+        w.crop[done] = 0
+        w.terrain[done & (w.terrain == FARMLAND)] = GRASS
+        # Anything lying on the ground burns
+        for y, x in np.argwhere(done):
+            w.piles.pop((int(x), int(y)), None)
         w.fire[catches] = BURN_TICKS
         if not (w.fire > 0).any():
             self.log("The fire has burnt out")

@@ -366,3 +366,59 @@ def disaster_sprites(tile_px):
     flood = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
     flood.fill((60, 120, 200, 150))
     return ash, fire, flood
+
+
+# ---------- farming, piles, weapons ----------
+CROP_STAGES = [
+    ["........",   # young sprouts
+     "........",
+     ".s..s..s",
+     "........",
+     "........",
+     ".s..s..s",
+     "........",
+     "........"],
+    ["........",   # growing
+     ".s..s..s",
+     ".s..s..s",
+     "........",
+     ".s..s..s",
+     ".s..s..s",
+     "........",
+     "........"],
+    [".y..y..y",   # ripe grain
+     ".y..y..y",
+     ".s..s..s",
+     ".y..y..y",
+     ".y..y..y",
+     ".s..s..s",
+     "........",
+     "........"],
+]
+CROP_PALETTE = {"s": (96, 176, 64), "y": (240, 204, 84)}
+
+PILE_ART = ["........",
+            "........",
+            "........",
+            "...bb...",
+            "..bmmb..",
+            ".bmmmmb.",
+            "..bbbb..",
+            "........"]
+PILE_PALETTE = {"b": (120, 84, 50), "m": (196, 146, 96)}
+
+# Weapons drawn in the agent's right hand
+WEAPON_ART = {
+    1: ["........", "........", ".......b", ".......b", ".......b", ".......b", "........", "........"],
+    2: ["........", "........", "........", "........", ".......g", "......gg", "........", "........"],
+    3: [".......g", ".......b", ".......b", ".......b", ".......b", ".......b", ".......b", "........"],
+}
+WEAPON_PALETTE = {"b": (150, 100, 50), "g": (200, 200, 210)}
+
+
+def farm_sprites(tile_px):
+    """Crop overlays (young, growing, ripe), a pile image, and weapon overlays."""
+    crops = [build_sprite(art, CROP_PALETTE, tile_px) for art in CROP_STAGES]
+    pile = build_sprite(PILE_ART, PILE_PALETTE, tile_px)
+    weapons = {k: build_sprite(art, WEAPON_PALETTE, tile_px) for k, art in WEAPON_ART.items()}
+    return crops, pile, weapons

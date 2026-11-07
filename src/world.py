@@ -36,6 +36,13 @@ CAVE_COUNT = 14
 CLIFF_CHANCE = 0.35      # chance a mountain edge tile is a cliff
 POISON_SHARE = 0.12      # share of forest tiles whose berries are poisonous
 
+# Farming
+CROP_GROW_TICKS = 400    # 4 days for a planted seed to ripen (with water nearby)
+DRY_GROWTH = 0.25        # crops far from water grow at a quarter of the speed
+WATER_REACH = 3          # tiles from water that count as "watered"
+CROP_YIELD = 6           # servings on a ripe crop tile
+PILE_TICKS = 5 * TICKS_PER_DAY   # dropped things rot or blow away after 5 days
+
 
 def smooth_noise(size, rng, octaves=5, start_cells=4):
     """Random 'hilly' values between 0 and 1.
@@ -83,6 +90,21 @@ class World:
         self.burnt = np.zeros(shape, dtype=np.int16)   # ash, slowly regrowing
         self.flood = np.zeros(shape, dtype=np.int16)   # flooded by a storm
         self.storm = 0                                  # ticks of storm left
+
+        # Farming: ticks until each planted tile is ripe (0 = not growing)
+        self.crop = np.zeros(shape, dtype=np.int16)
+        water = np.isin(self.terrain, (RIVER, POND, DEEP_WATER))
+        self.watered = water.copy()
+        for _ in range(WATER_REACH):
+            grown = self.watered.copy()
+            grown[1:, :] |= self.watered[:-1, :]
+            grown[:-1, :] |= self.watered[1:, :]
+            grown[:, 1:] |= self.watered[:, :-1]
+            grown[:, :-1] |= self.watered[:, 1:]
+            self.watered = grown
+
+        # Things lying on the ground: {(x, y): {"meat": 3, "weapon": 2, ..., "tick": t}}
+        self.piles = {}
 
     # ---------- world generation ----------
     def _generate(self):
@@ -174,6 +196,43 @@ class World:
         """Advance the world by one tick."""
         self.tick += 1
         self._regrow_berries()
+        self._grow_crops()
+        if self.tick % 50 == 0:
+            self._clean_old_piles()
+
+    def _grow_crops(self):
+        growing = (self.terrain == FARMLAND) & (self.crop > 0)
+        if self.season != "winter" and growing.any():
+            # Watered crops grow every tick; dry ones only sometimes
+            grows = growing & (self.watered | (self.rng.random(self.crop.shape) < DRY_GROWTH))
+            self.crop[grows] -= 1
+            ripe = growing & (self.crop == 0)
+            self.berries[ripe] = CROP_YIELD
+        # Fully eaten (or burnt) farmland turns back into grass
+        empty = (self.terrain == FARMLAND) & (self.crop == 0) & (self.berries == 0)
+        self.terrain[empty] = GRASS
+
+    # ---------- things on the ground ----------
+    def drop(self, x, y, items):
+        pile = self.piles.setdefault((x, y), {})
+        for item, n in items.items():
+            if item in ("weapon", "weapon_uses"):
+                if n > pile.get(item, 0) or item == "weapon_uses":
+                    pile[item] = n
+            else:
+                pile[item] = pile.get(item, 0) + n
+        pile["tick"] = self.tick
+
+    def clean_pile(self, x, y):
+        """Remove a pile once nothing useful is left in it."""
+        pile = self.piles.get((x, y))
+        if pile is not None and not any(n > 0 for k, n in pile.items()
+                                        if k not in ("tick", "poison", "weapon_uses")):
+            del self.piles[(x, y)]
+
+    def _clean_old_piles(self):
+        for spot in [s for s, p in self.piles.items() if self.tick - p["tick"] > PILE_TICKS]:
+            del self.piles[spot]
 
     def _regrow_berries(self):
         chance = 0.0 if self.season == "winter" else REGROW_CHANCE  # no growth in winter
