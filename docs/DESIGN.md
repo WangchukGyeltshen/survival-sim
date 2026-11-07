@@ -38,7 +38,7 @@ Nothing else is rewarded. Eating, hunting, farming, crafting, fighting and avoid
 - Stats: health, hunger, thirst, energy, warmth, age
 - Sex: male or female
 - Inventory: can carry a small amount (meat, berries, seeds, sticks, stones, one weapon)
-- Actions: move (4 directions), rest, eat, drink, pick up, plant, craft, attack, mate
+- Actions: move (4 directions), rest, eat, drink, pick up, plant, craft, attack animal, attack person, mate
 - The attack action works on animals and on other agents alike; agents are not told who or what they should attack
 
 ## Food Sources (all must be discovered)
@@ -102,11 +102,24 @@ Two layers, like real humans:
 2. **Evolution (genes):** each agent has genes: small personal adjustments to the shared brain plus traits (speed, vision range, strength, cold resistance). A child gets a mix of both parents' genes with small random mutations. Agents that survive and breed more pass on their genes more.
 
 ## Breeding
-- Two adults of opposite sex, next to each other, both choose "mate"
-- Both must be healthy, fed and watered
-- Pregnancy lasts a few days; the mother is slower during it
-- After giving birth, a female cannot breed again for a while
-- Child starts next to the mother, inheriting genes from both parents
+- Two adults (age 1 year or more) of opposite sex, next to each other, both choose "mate" within a few ticks of each other
+- Both must have food, water and health above 50
+- Pregnancy lasts 3 days; the mother uses 50% more food and energy during it
+- After giving birth, a mother cannot conceive again for 5 days; there is a small (2%) risk of dying in childbirth
+- A child starts on the mother's tile, moves at half speed and hits at 30% strength until age 1 year
+- Population cap: 1,000 alive at once
+
+## Genes
+Every agent is born with four genes. Higher is better, but each point above normal costs extra food (a bigger, tougher body needs more fuel), so evolution has to find a balance.
+
+| Gene | Effect |
+|---|---|
+| Strength | Damage dealt in fights and hunts |
+| Hardiness | Resistance to cold |
+| Endurance | Less energy used when walking |
+| Vision | How far the agent can see (used by the brain in phase 10) |
+
+A child gets the average of both parents' genes plus a small random mutation.
 
 ## Measurements (what we record)
 - Population over time, births and deaths per day

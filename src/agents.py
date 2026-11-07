@@ -26,9 +26,10 @@ PLANT = 8
 CRAFT = 9
 ATTACK_ANIMAL = 10
 ATTACK_PERSON = 11
-NUM_ACTIONS = 12
+MATE = 12
+NUM_ACTIONS = 13
 ACTION_NAMES = ["rest", "up", "down", "left", "right", "eat", "drink", "pick up",
-                "plant", "craft", "attack animal", "attack person"]
+                "plant", "craft", "attack animal", "attack person", "mate"]
 MOVES = {UP: (0, -1), DOWN: (0, 1), LEFT: (-1, 0), RIGHT: (1, 0)}
 
 MALE = 0
@@ -105,6 +106,33 @@ FIRE_DAMAGE = 20.0        # health lost per tick standing in fire
 LIFESPAN_YEARS = (3, 5)   # each agent's natural lifespan is somewhere in here
 INSTANT_DEATH = 1000.0
 
+# ---------- population and breeding ----------
+CAPACITY = 1200           # array slots (alive + recently dead)
+POPULATION_CAP = 1000     # most agents alive at once
+ADULT_AGE = 1.0           # years before an agent can breed and reaches full strength
+MATE_WINDOW = 5           # after choosing "mate", an agent stays willing for this many ticks
+MATE_MIN = 50             # food, water and health must all be above this to conceive
+MATE_ENERGY = 2.0
+PREGNANCY_TICKS = 300     # 3 days
+MOTHER_REST_TICKS = 500   # a mother can't conceive again for 5 days after birth
+FATHER_REST_TICKS = 100
+CHILDBIRTH_RISK = 0.02    # small chance the mother dies giving birth
+PREGNANT_COST = 1.5       # pregnant mothers burn 50% more food and move more slowly
+CHILD_STRENGTH = 0.3      # children hit at 30% strength...
+CHILD_MOVE_EVERY = 2      # ...and only manage a step every 2nd tick
+NEWBORN_FOOD = 80
+
+# ---------- genes ----------
+# Each agent is born with these. Being above 1.0 (or above 5 for vision) is
+# better, but costs extra food: a bigger, tougher body needs more fuel.
+GENE_NAMES = ["strength", "hardiness", "endurance", "vision"]
+GENE_LIMITS = {"strength": (0.5, 1.6), "hardiness": (0.5, 1.6),
+               "endurance": (0.5, 1.6), "vision": (2.0, 8.0)}
+GENE_START = {"strength": (1.0, 0.1), "hardiness": (1.0, 0.1),
+              "endurance": (1.0, 0.1), "vision": (5.0, 0.5)}     # (average, spread)
+MUTATION = {"strength": 0.05, "hardiness": 0.05, "endurance": 0.05, "vision": 0.25}
+GENE_FOOD_COST = 0.5      # each +0.1 above normal adds 5% to food use
+
 # Causes of death (stored per agent)
 ALIVE = 0
 STARVATION = 1
@@ -122,54 +150,122 @@ LIGHTNING = 12
 OLD_AGE = 13
 KICKED_BY_DEER = 14
 KILLED_BY_PERSON = 15
+CHILDBIRTH = 16
 DEATH_CAUSES = ["alive", "starvation", "thirst", "wolf", "bear", "cold", "poison",
                 "sickness", "drowned", "fell", "flood", "fire", "lightning", "old age",
-                "deer", "killed by person"]
+                "deer", "killed by person", "childbirth"]
 
 TICKS_PER_YEAR = TICKS_PER_DAY * DAYS_PER_YEAR
 
 
 class Agents:
-    def __init__(self, world, count, rng):
+    def __init__(self, world, count, rng, capacity=CAPACITY):
         self.world = world
         self.rng = rng
-        self.count = count
+        self.count = n = capacity    # number of slots; only some are alive
 
-        # Spawn on random grass or forest tiles
-        land = np.argwhere(np.isin(world.terrain, (GRASS, FOREST)))
-        spots = land[rng.choice(len(land), count, replace=False)]
-        self.y = spots[:, 0].astype(np.int32)
-        self.x = spots[:, 1].astype(np.int32)
+        self.x = np.zeros(n, dtype=np.int32)
+        self.y = np.zeros(n, dtype=np.int32)
+        self.alive = np.zeros(n, dtype=bool)
+        self.used = np.zeros(n, dtype=bool)          # slot has ever held an agent
+        self.sex = np.zeros(n, dtype=np.int8)
+        self.age = np.zeros(n, dtype=np.int64)
+        self.lifespan = np.zeros(n, dtype=np.int64)
+        self.generation = np.zeros(n, dtype=np.int32)
+        self.mother = np.full(n, -1, dtype=np.int32)
+        self.father = np.full(n, -1, dtype=np.int32)
 
-        self.alive = np.ones(count, dtype=bool)
-        self.sex = np.array([MALE, FEMALE] * (count // 2) + [MALE] * (count % 2), dtype=np.int8)
-        rng.shuffle(self.sex)
-        # Start as young adults, between 1 and 2 years old
-        self.age = rng.integers(TICKS_PER_YEAR, 2 * TICKS_PER_YEAR, count)
+        self.health = np.zeros(n)
+        self.food = np.zeros(n)
+        self.water = np.zeros(n)
+        self.energy = np.zeros(n)
+        self.warmth = np.zeros(n)
+        self.sick = np.zeros(n, dtype=np.int32)      # ticks of sickness left
 
-        self.health = np.full(count, MAX_STAT)
-        self.food = rng.uniform(60, 100, count)
-        self.water = rng.uniform(60, 100, count)
-        self.energy = rng.uniform(60, 100, count)
-        self.warmth = np.full(count, MAX_STAT)
-        self.sick = np.zeros(count, dtype=np.int32)   # ticks of sickness left
-        low, high = LIFESPAN_YEARS
-        self.lifespan = rng.integers(low * TICKS_PER_YEAR, high * TICKS_PER_YEAR, count)
+        self.genes = {g: np.ones(n) for g in GENE_NAMES}
+        self.willing = np.zeros(n, dtype=np.int64)   # willing to mate until this tick
+        self.pregnant = np.zeros(n, dtype=np.int32)  # ticks until birth (0 = not pregnant)
+        self.partner = np.full(n, -1, dtype=np.int32)
+        self.partner_genes = {g: np.ones(n) for g in GENE_NAMES}  # father's genes, saved at conception
+        self.partner_generation = np.zeros(n, dtype=np.int32)
+        self.rest_until = np.zeros(n, dtype=np.int64)  # can't conceive again before this tick
+        self.children = np.zeros(n, dtype=np.int32)
 
         # Inventory: how many of each item every agent carries
-        self.inv = {item: np.zeros(count, dtype=np.int32) for item in ITEMS}
-        self.inv_poison = np.zeros(count, dtype=np.int32)  # how many carried berries are poisonous
-        self.weapon = np.zeros(count, dtype=np.int8)       # HANDS, STICK, SHARP_STONE or SPEAR
-        self.weapon_uses = np.zeros(count, dtype=np.int32)
-        self.kills = np.zeros(count, dtype=np.int32)       # people this agent has killed
+        self.inv = {item: np.zeros(n, dtype=np.int32) for item in ITEMS}
+        self.inv_poison = np.zeros(n, dtype=np.int32)  # how many carried berries are poisonous
+        self.weapon = np.zeros(n, dtype=np.int8)       # HANDS, STICK, SHARP_STONE or SPEAR
+        self.weapon_uses = np.zeros(n, dtype=np.int32)
+        self.kills = np.zeros(n, dtype=np.int32)       # people this agent has killed
 
         self.counts = Counter()   # how often things happen (hunts, crafts, plants...)
         self.hits = []            # (x, y) of every hit this tick, for the viewer
+        self.hearts = []          # (x, y) of every conception this tick, for the viewer
+        self.births = 0
 
-        self.last_action = np.zeros(count, dtype=np.int8)
-        self.last_hurt_by = np.zeros(count, dtype=np.int8)   # what last damaged them
-        self.cause_of_death = np.zeros(count, dtype=np.int8)
-        self.death_tick = np.full(count, -1)
+        self.last_action = np.zeros(n, dtype=np.int8)
+        self.last_hurt_by = np.zeros(n, dtype=np.int8)   # what last damaged them
+        self.cause_of_death = np.zeros(n, dtype=np.int8)
+        self.death_tick = np.full(n, -1)
+
+        # The first people: young adults (1 to 2 years old) on random grass or forest,
+        # half male and half female, with slightly different genes
+        land = np.argwhere(np.isin(world.terrain, (GRASS, FOREST)))
+        spots = land[rng.choice(len(land), count, replace=False)]
+        sexes = np.array([MALE, FEMALE] * (count // 2) + [MALE] * (count % 2))
+        rng.shuffle(sexes)
+        for k in range(count):
+            genes = {g: rng.normal(*GENE_START[g]) for g in GENE_NAMES}
+            age = int(rng.integers(TICKS_PER_YEAR, 2 * TICKS_PER_YEAR))
+            self.add(spots[k, 1], spots[k, 0], sexes[k], genes, age=age, food=rng.uniform(60, 100))
+
+    def free_slot(self):
+        """A slot that never held anyone, or whose owner died over a day ago."""
+        old = ~self.alive & (self.world.tick - self.death_tick > TICKS_PER_DAY)
+        free = np.flatnonzero(~self.used | (self.used & old))
+        return int(free[0]) if len(free) else None
+
+    def add(self, x, y, sex, genes, age=0, food=NEWBORN_FOOD, generation=0, mother=-1, father=-1):
+        """Put a new agent in a free slot. Returns its index (or None if full)."""
+        i = self.free_slot()
+        if i is None:
+            return None
+        rng = self.rng
+        self.x[i], self.y[i] = x, y
+        self.alive[i] = self.used[i] = True
+        self.sex[i] = sex
+        self.age[i] = age
+        low, high = LIFESPAN_YEARS
+        self.lifespan[i] = rng.integers(low * TICKS_PER_YEAR, high * TICKS_PER_YEAR)
+        self.generation[i] = generation
+        self.mother[i], self.father[i] = mother, father
+        self.health[i] = MAX_STAT
+        self.food[i] = food
+        self.water[i] = rng.uniform(60, 100)
+        self.energy[i] = rng.uniform(60, 100)
+        self.warmth[i] = MAX_STAT
+        self.sick[i] = 0
+        for g in GENE_NAMES:
+            self.genes[g][i] = np.clip(genes[g], *GENE_LIMITS[g])
+        self.willing[i] = 0
+        self.pregnant[i] = 0
+        self.partner[i] = -1
+        self.rest_until[i] = 0
+        self.children[i] = 0
+        for item in ITEMS:
+            self.inv[item][i] = 0
+        self.inv_poison[i] = 0
+        self.weapon[i] = HANDS
+        self.weapon_uses[i] = 0
+        self.kills[i] = 0
+        self.last_action[i] = REST
+        self.last_hurt_by[i] = ALIVE
+        self.cause_of_death[i] = ALIVE
+        self.death_tick[i] = -1
+        return i
+
+    def is_adult(self, i):
+        return self.age[i] >= ADULT_AGE * TICKS_PER_YEAR
 
     @property
     def population(self):
@@ -191,6 +287,10 @@ class Agents:
         # Exhausted agents (no energy) cannot move, so their move becomes rest
         tired = self.energy <= 0
         moving = alive & np.isin(a, list(MOVES)) & ~tired
+        # Children only manage a step every few ticks
+        child = self.age < ADULT_AGE * TICKS_PER_YEAR
+        if world.tick % CHILD_MOVE_EVERY:
+            moving &= ~child
 
         # ----- movement -----
         dx = np.zeros(self.count, dtype=np.int32)
@@ -203,7 +303,8 @@ class Agents:
         can_enter = WALKABLE[world.terrain[new_y, new_x]]
         self.x = np.where(can_enter, new_x, self.x)
         self.y = np.where(can_enter, new_y, self.y)
-        self.energy[moving] -= MOVE_ENERGY
+        move_cost = MOVE_ENERGY / self.genes["endurance"] * np.where(self.pregnant > 0, PREGNANT_COST, 1)
+        self.energy[moving] -= move_cost[moving]
 
         # Walking into deep water or off a cliff is deadly
         here = world.terrain[self.y, self.x]
@@ -235,6 +336,11 @@ class Agents:
                 self.attack_animal(i, animals)
             elif act == ATTACK_PERSON:
                 self.attack_person(i)
+            elif act == MATE:
+                self.want_to_mate(i)
+        self.hearts = []
+        self.find_partners()
+        self.pregnancies()
 
         # Carried meat slowly goes bad
         has_meat = np.flatnonzero(alive & (self.inv["meat"] > 0))
@@ -259,7 +365,7 @@ class Agents:
             self.sick[unlucky] = SICK_TICKS
 
         # ----- body needs -----
-        self.food[alive] -= FOOD_DRAIN
+        self.food[alive] -= self.food_use()[alive]
         self.water[alive] -= WATER_DRAIN
         self.energy[alive] -= IDLE_ENERGY
         self.age[alive] += 1
@@ -293,6 +399,83 @@ class Agents:
         for stat in (self.food, self.water, self.energy, self.warmth):
             np.clip(stat, 0, MAX_STAT, out=stat)
         np.clip(self.health, None, MAX_STAT, out=self.health)
+
+    def food_use(self):
+        """Food burned per tick: more for 'expensive' genes and for pregnancy."""
+        extra = sum(np.maximum(self.genes[g] - 1, 0) for g in ("strength", "hardiness", "endurance"))
+        extra += np.maximum(self.genes["vision"] - 5, 0) / 5
+        use = FOOD_DRAIN * (1 + GENE_FOOD_COST * extra)
+        return use * np.where(self.pregnant > 0, PREGNANT_COST, 1)
+
+    # ================= breeding =================
+    def want_to_mate(self, i):
+        if self.is_adult(i):
+            self.willing[i] = self.world.tick + MATE_WINDOW
+
+    def can_conceive(self, i):
+        return (self.alive[i] and self.health[i] > MATE_MIN and self.food[i] > MATE_MIN
+                and self.water[i] > MATE_MIN and self.is_adult(i)
+                and self.pregnant[i] == 0 and self.rest_until[i] <= self.world.tick)
+
+    def find_partners(self):
+        """A willing woman and a willing man standing next to each other may conceive."""
+        tick = self.world.tick
+        pending = int((self.pregnant > 0).sum())
+        women = np.flatnonzero(self.alive & (self.sex == FEMALE) & (self.willing >= tick))
+        men = np.flatnonzero(self.alive & (self.sex == MALE) & (self.willing >= tick))
+        if len(women) == 0 or len(men) == 0:
+            return
+        for f in women:
+            if self.population + pending >= POPULATION_CAP:
+                return
+            if not self.can_conceive(f):
+                continue
+            d = np.abs(self.x[men] - self.x[f]) + np.abs(self.y[men] - self.y[f])
+            for m in men[np.argsort(d)]:
+                if abs(self.x[m] - self.x[f]) + abs(self.y[m] - self.y[f]) > 1:
+                    break
+                if self.can_conceive(m):
+                    self.pregnant[f] = PREGNANCY_TICKS
+                    self.partner[f] = m
+                    for g in GENE_NAMES:
+                        self.partner_genes[g][f] = self.genes[g][m]
+                    self.partner_generation[f] = self.generation[m]
+                    self.rest_until[m] = tick + FATHER_REST_TICKS
+                    self.willing[f] = self.willing[m] = 0
+                    self.energy[[f, m]] -= MATE_ENERGY
+                    self.hearts.append((int(self.x[f]), int(self.y[f])))
+                    self.counts["conceived child"] += 1
+                    pending += 1
+                    break
+
+    def pregnancies(self):
+        expecting = np.flatnonzero(self.alive & (self.pregnant > 0))
+        self.pregnant[expecting] -= 1
+        for f in expecting:
+            if self.pregnant[f] == 0:
+                self.give_birth(f)
+
+    def give_birth(self, f):
+        m = self.partner[f]
+        genes = {}
+        for g in GENE_NAMES:
+            # Half from each parent (the father's genes were saved at conception,
+            # so this works even if he has died since), plus a small random mutation
+            genes[g] = (self.genes[g][f] + self.partner_genes[g][f]) / 2 + \
+                self.rng.normal(0, MUTATION[g])
+        generation = max(self.generation[f], self.partner_generation[f]) + 1
+        child = self.add(self.x[f], self.y[f], self.rng.integers(2), genes,
+                         generation=generation, mother=f, father=m)
+        self.rest_until[f] = self.world.tick + MOTHER_REST_TICKS
+        self.partner[f] = -1
+        if child is not None:
+            self.children[f] += 1
+            if m >= 0 and self.alive[m]:
+                self.children[m] += 1
+            self.births += 1
+            self.counts["child born"] += 1
+        if self.rng.random() < CHILDBIRTH_RISK:
+            self.hurt(f, INSTANT_DEATH, CHILDBIRTH)
 
     # ================= actions =================
     def eat(self, i):
@@ -411,7 +594,9 @@ class Agents:
         """Damage this agent deals now, and wear down its weapon."""
         weapon = self.weapon[i]
         self.energy[i] -= ATTACK_ENERGY
-        damage = WEAPON_DAMAGE[weapon]
+        damage = WEAPON_DAMAGE[weapon] * self.genes["strength"][i]
+        if not self.is_adult(i):
+            damage *= CHILD_STRENGTH
         if weapon != HANDS:
             self.weapon_uses[i] -= 1
             if self.weapon_uses[i] <= 0:
@@ -474,7 +659,7 @@ class Agents:
         others = around[self.y, self.x] - 1
         shelter *= np.maximum(1 - HUDDLE_SHELTER * others, MIN_HUDDLE)
 
-        change = np.where(loss > 0, -loss * shelter, -loss)
+        change = np.where(loss > 0, -loss * shelter / self.genes["hardiness"], -loss)
         change[here == CAVE] = CAVE_WARMTH
         change[disasters.near_fire(self.x, self.y)] = FIRE_WARMTH
         self.warmth[alive] += change[alive]
@@ -484,6 +669,7 @@ class Agents:
         dead = self.alive & (self.health <= 0)
         for i in np.flatnonzero(dead):
             self.drop_everything(i)
+            self.pregnant[i] = 0   # an unborn baby dies with its mother
         if dead.any():
             self.health[dead] = 0
             self.cause_of_death[dead] = self.last_hurt_by[dead]

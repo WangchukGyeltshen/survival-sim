@@ -269,11 +269,45 @@ def build_sprite(pattern, palette, tile_px):
     return pygame.transform.scale(small, (tile_px, tile_px))
 
 
+CHILD = ["........",
+         "........",
+         "...hh...",
+         "...ss...",
+         "..tttt..",
+         "..stts..",
+         "...tt...",
+         "...pp..."]
+
+PREGNANT = ["..hhhh..",
+            "..hssh..",
+            "..ssss..",
+            ".tttttt.",
+            "s.tttttt",
+            "..ttttt.",
+            "..p..p..",
+            "..p..p.."]
+
+HEART = ["........",
+         ".rr.rr..",
+         "rrrrrrr.",
+         "rrrrrrr.",
+         ".rrrrr..",
+         "..rrr...",
+         "...r....",
+         "........"]
+
+
 def agent_sprites(tile_px):
-    """Returns {sex: image} and the bones image for one zoom level."""
-    agents = {sex: build_sprite(AGENT, pal, tile_px) for sex, pal in AGENT_PALETTES.items()}
+    """Returns ({(sex, kind): image}, bones, heart) for one zoom level,
+    where kind is "adult", "child" or "pregnant"."""
+    people = {}
+    for sex, pal in AGENT_PALETTES.items():
+        people[(sex, "adult")] = build_sprite(AGENT, pal, tile_px)
+        people[(sex, "child")] = build_sprite(CHILD, pal, tile_px)
+        people[(sex, "pregnant")] = build_sprite(PREGNANT, pal, tile_px)
     bones = build_sprite(BONES, BONES_PALETTE, tile_px)
-    return agents, bones
+    heart = build_sprite(HEART, {"r": (240, 80, 120)}, tile_px)
+    return people, bones, heart
 
 
 # ---------- animals ----------

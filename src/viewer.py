@@ -22,7 +22,7 @@ from src.world import POND, TICKS_PER_DAY, DAYLIGHT_TICKS
 from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites,
                          animal_sprites, WOLF_EYE, disaster_sprites, farm_sprites)
 from src.world import FARMLAND, CROP_GROW_TICKS
-from src.agents import ITEMS, WEAPON_NAMES, HANDS
+from src.agents import ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
 from src.agents import ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE
@@ -98,6 +98,7 @@ class Viewer:
         self.hazards = {size: disaster_sprites(size) for size in ZOOMS}
         self.farm = {size: farm_sprites(size) for size in ZOOMS}
         self.hit_marks = []      # [x, y, frames left] red slashes where hits landed
+        self.heart_marks = []    # [x, y, frames left] hearts where a child was conceived
         self.flash = 0           # frames of lightning flash left
         self.rain = np.random.default_rng(1).random((160, 2))   # raindrop positions
         self.zoom = START_ZOOM
@@ -270,7 +271,7 @@ class Viewer:
     def draw_agents(self, first_x, first_y, last_x, last_y):
         a = self.sim.agents
         tile = self.tile
-        people, bones = self.people[tile]
+        people, bones, heart = self.people[tile]
         in_view = (a.x >= first_x) & (a.x < last_x) & (a.y >= first_y) & (a.y < last_y)
 
         # Bones where agents died recently, fading away
@@ -290,9 +291,11 @@ class Viewer:
             self.screen.blit(beasts[an.species[i]], self.to_screen(an.x[i], an.y[i]))
 
         weapons = self.farm[tile][2]
+        adult_age = ADULT_AGE * TICKS_PER_YEAR
         for i in np.flatnonzero(a.alive & in_view):
             pos = self.to_screen(a.x[i], a.y[i])
-            self.screen.blit(people[a.sex[i]], pos)
+            kind = "child" if a.age[i] < adult_age else ("pregnant" if a.pregnant[i] else "adult")
+            self.screen.blit(people[(a.sex[i], kind)], pos)
             if a.weapon[i] != HANDS:
                 self.screen.blit(weapons[a.weapon[i]], pos)
 
@@ -302,6 +305,11 @@ class Viewer:
             pygame.draw.line(self.screen, (240, 40, 40), (px + 2, py + 2), (px + tile - 3, py + tile - 3), 3)
             mark[2] -= 1
         self.hit_marks = [m for m in self.hit_marks if m[2] > 0]
+        for mark in self.heart_marks:
+            px, py = self.to_screen(mark[0], mark[1])
+            self.screen.blit(heart, (px, py - tile // 2 - (40 - mark[2]) // 4))   # floats up
+            mark[2] -= 1
+        self.heart_marks = [m for m in self.heart_marks if m[2] > 0]
 
         if self.selected is not None and a.alive[self.selected]:
             px, py = self.to_screen(a.x[self.selected], a.y[self.selected])
@@ -325,8 +333,8 @@ class Viewer:
         if i is None:
             return
         a = self.sim.agents
-        height = 208 if a.alive[i] else 56
-        box = pygame.Rect(10, HUD_HEIGHT + WINDOW_H - height - 10, 380, height)
+        height = 268 if a.alive[i] else 56
+        box = pygame.Rect(10, HUD_HEIGHT + WINDOW_H - height - 10, 410, height)
         panel = pygame.Surface(box.size, pygame.SRCALPHA)
         panel.fill((24, 20, 28, 225))
         self.screen.blit(panel, box)
@@ -334,12 +342,19 @@ class Viewer:
 
         sex = "Male" if a.sex[i] == MALE else "Female"
         years = a.age[i] / TICKS_PER_YEAR
-        title = f"#{i}  {sex}  age {years:.1f}y"
+        title = f"#{i}  {sex}  age {years:.1f}y  gen {a.generation[i]}"
         label = self.small_font.render(title, False, HUD_TEXT)
         self.screen.blit(label, (box.x + 10, box.y + 8))
+        tags = []
         if a.alive[i] and a.sick[i] > 0:
-            sick = self.small_font.render("SICK", False, (150, 220, 90))
-            self.screen.blit(sick, (box.x + 18 + label.get_width(), box.y + 8))
+            tags.append(("SICK", (150, 220, 90)))
+        if a.alive[i] and a.pregnant[i] > 0:
+            tags.append((f"PREGNANT {a.pregnant[i] / TICKS_PER_DAY:.1f}d", (240, 120, 160)))
+        tx = box.x + 18 + label.get_width()
+        for text, colour in tags:
+            tag = self.small_font.render(text, False, colour)
+            self.screen.blit(tag, (tx, box.y + 8))
+            tx += tag.get_width() + 8
 
         if not a.alive[i]:
             cause = DEATH_CAUSES[a.cause_of_death[i]]
@@ -367,6 +382,11 @@ class Viewer:
         carried = ", ".join(f"{a.inv[item][i]} {item}" for item in ITEMS if a.inv[item][i])
         label = self.small_font.render(f"carry: {carried or 'nothing'}", False, HUD_TEXT)
         self.screen.blit(label, (box.x + 10, y + 44))
+        genes = "  ".join(f"{g[:3]} {a.genes[g][i]:.2f}" for g in GENE_NAMES)
+        label = self.small_font.render(f"genes: {genes}", False, (180, 200, 240))
+        self.screen.blit(label, (box.x + 10, y + 64))
+        family = f"children: {a.children[i]}   kills: {a.kills[i]}"
+        self.screen.blit(self.small_font.render(family, False, (170, 160, 180)), (box.x + 10, y + 84))
 
     def build_minimap(self):
         w = self.world
@@ -429,10 +449,13 @@ class Viewer:
 
         a = self.sim.agents
         males = int((a.alive & (a.sex == MALE)).sum())
-        x = self.text(f"ALIVE {a.population}", x + 24, HUD_TEXT)
-        x = self.text(f"({males}M {a.population - males}F)", x + 8, (170, 160, 180))
+        x = self.text(f"ALIVE {a.population}", x + 20, HUD_TEXT)
+        x = self.text(f"({males}M {a.population - males}F)", x + 6, (170, 160, 180))
         dead = sum(self.sim.deaths.values())
-        x = self.text(f"DEAD {dead}", x + 20, (214, 90, 90))
+        x = self.text(f"DEAD {dead}", x + 16, (214, 90, 90))
+        x = self.text(f"BORN {a.births}", x + 16, (240, 120, 160))
+        top_gen = int(a.generation[a.alive].max()) if a.population else 0
+        x = self.text(f"GEN {top_gen}", x + 16, (180, 200, 240))
 
         # Active disasters
         if w.storm > 0:
@@ -568,6 +591,7 @@ class Viewer:
                 while tick_timer >= 1:
                     self.sim.step()
                     self.hit_marks += [[x, y, 12] for x, y in self.sim.agents.hits]
+                    self.heart_marks += [[x, y, 40] for x, y in self.sim.agents.hearts]
                     tick_timer -= 1
             if self.following and self.selected is not None:
                 a = self.sim.agents
