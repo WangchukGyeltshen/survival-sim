@@ -207,6 +207,8 @@ class Agents:
         self.new_parents = []     # (mother, father) of every child born this tick
 
         self.last_action = np.zeros(n, dtype=np.int8)
+        self.did = np.full(n, -1, dtype=np.int8)        # last action that actually worked...
+        self.did_tick = np.full(n, -1000, dtype=np.int64)  # ...and when (for the viewer's icons)
         self.last_hurt_by = np.zeros(n, dtype=np.int8)   # what last damaged them
         self.cause_of_death = np.zeros(n, dtype=np.int8)
         self.death_tick = np.full(n, -1)
@@ -264,6 +266,8 @@ class Agents:
         self.weapon_uses[i] = 0
         self.kills[i] = 0
         self.last_action[i] = REST
+        self.did[i] = -1
+        self.did_tick[i] = -1000
         self.last_hurt_by[i] = ALIVE
         self.cause_of_death[i] = ALIVE
         self.death_tick[i] = -1
@@ -367,6 +371,8 @@ class Agents:
                 near_water |= DRINKABLE[tile]
                 clean |= DRINKABLE[tile] & (tile != POND)
             self.water[drinking[near_water]] += DRINK_WATER
+            self.did[drinking[near_water]] = DRINK
+            self.did_tick[drinking[near_water]] = world.tick
             # Only pond water nearby: it might make you sick
             dirty = drinking[near_water & ~clean]
             unlucky = dirty[self.rng.random(len(dirty)) < POND_SICK_CHANCE]
@@ -453,6 +459,8 @@ class Agents:
                     self.energy[[f, m]] -= MATE_ENERGY
                     self.hearts.append((int(self.x[f]), int(self.y[f])))
                     self.counts["conceived child"] += 1
+                    self.success(f, MATE)
+                    self.success(m, MATE)
                     pending += 1
                     break
 
@@ -486,9 +494,20 @@ class Agents:
         if self.rng.random() < CHILDBIRTH_RISK:
             self.hurt(f, INSTANT_DEATH, CHILDBIRTH)
 
+    def success(self, i, action):
+        """Remember that agent i's action worked (shown as an icon in the viewer)."""
+        self.did[i] = action
+        self.did_tick[i] = self.world.tick
+
     # ================= actions =================
     def eat(self, i):
         """Eat from the tile (bush or ripe crop), otherwise something carried."""
+        before = self.food[i]
+        self._eat(i)
+        if self.food[i] > before:
+            self.success(i, EAT)
+
+    def _eat(self, i):
         w = self.world
         y, x = self.y[i], self.x[i]
         if w.berries[y, x] > 0:
@@ -536,6 +555,12 @@ class Agents:
     def pick_up(self, i):
         """Pick up whatever is here, in this order: a pile of dropped things,
         a ripe crop, a berry, a stick (forest), a stone (next to rock)."""
+        before = (sum(int(self.inv[item][i]) for item in ITEMS), int(self.weapon[i]))
+        self._pick_up(i)
+        if (sum(int(self.inv[item][i]) for item in ITEMS), int(self.weapon[i])) != before:
+            self.success(i, PICK_UP)
+
+    def _pick_up(self, i):
         w = self.world
         x, y = int(self.x[i]), int(self.y[i])
         if (x, y) in w.piles:
@@ -585,6 +610,7 @@ class Agents:
             w.crop[y, x] = CROP_GROW_TICKS
             w.berries[y, x] = 0
             self.counts["planted seed"] += 1
+            self.success(i, PLANT)
 
     def craft(self, i):
         """Sharp stone + stick = spear. A stone knocked against rock = sharp stone."""
@@ -592,12 +618,14 @@ class Agents:
             self.inv["sticks"][i] -= 1
             self.weapon[i], self.weapon_uses[i] = SPEAR, WEAPON_USES[SPEAR]
             self.counts["crafted spear"] += 1
+            self.success(i, CRAFT)
         elif self.weapon[i] < SHARP_STONE and self.inv["stones"][i] > 0 and self.near_rock(i):
             self.inv["stones"][i] -= 1
             if self.weapon[i] == STICK and self.room(i, "sticks") > 0:
                 self.inv["sticks"][i] += 1   # keep the stick for later
             self.weapon[i], self.weapon_uses[i] = SHARP_STONE, WEAPON_USES[SHARP_STONE]
             self.counts["crafted sharp stone"] += 1
+            self.success(i, CRAFT)
 
     def strike(self, i):
         """Damage this agent deals now, and wear down its weapon."""
@@ -625,6 +653,7 @@ class Agents:
         if self.rng.random() < MISS_CHANCE.get(kind, 0):
             return   # it dodged
         self.hits.append((int(animals.x[j]), int(animals.y[j])))
+        self.success(i, ATTACK_ANIMAL)
         meat = animals.hit_by_agent(j, damage, i, self)
         if meat:
             self.counts[f"hunted {animals.name(kind)}"] += 1
@@ -643,6 +672,7 @@ class Agents:
         j = self.rng.choice(targets[d[targets] == d[targets].min()])
         self.hurt(j, self.strike(i), KILLED_BY_PERSON)
         self.hits.append((int(self.x[j]), int(self.y[j])))
+        self.success(i, ATTACK_PERSON)
         self.counts["attacked person"] += 1
         if self.health[j] <= 0:
             self.kills[i] += 1

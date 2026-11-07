@@ -8,6 +8,7 @@ Controls:
     click an agent         select it and see its stats
     F                      camera follows the selected agent
     V                      show what the selected agent sees
+    I                      show / hide action icons
     + / -                  speed up / slow down
     SPACE                  pause / resume
     M                      show / hide minimap
@@ -21,9 +22,11 @@ import pygame
 
 from src.world import POND, TICKS_PER_DAY, DAYLIGHT_TICKS
 from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites,
-                         animal_sprites, WOLF_EYE, disaster_sprites, farm_sprites)
+                         animal_sprites, WOLF_EYE, disaster_sprites, farm_sprites,
+                         shadow_sprite, icon_sprites)
 from src.world import FARMLAND, CROP_GROW_TICKS
-from src.agents import ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE
+from src.agents import (ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE, EAT, DRINK,
+                        PICK_UP, PLANT, CRAFT, ATTACK_ANIMAL, ATTACK_PERSON, MATE)
 from src.observe import observe, CH, VIEW_SIZE, TERRAIN_ORDER
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
@@ -38,6 +41,9 @@ MINIMAP_SCALE = 1                # minimap pixels per tile
 
 SPEEDS = [1, 2, 5, 10, 20, 50, 100, 300]   # ticks per second
 GRAVE_TICKS = TICKS_PER_DAY      # bones stay visible for one day
+ICON_TICKS = 6                   # action icons stay up for this many ticks
+ICON_FOR_ACTION = {EAT: "eat", DRINK: "drink", PICK_UP: "pick up", PLANT: "plant", CRAFT: "craft",
+                   ATTACK_ANIMAL: "attack", ATTACK_PERSON: "attack", MATE: "mate"}
 SELECT_COLOUR = (255, 230, 90)
 BAR_COLOURS = {
     "health": (214, 60, 70),
@@ -65,6 +71,7 @@ HELP_LINES = [
     "click agent     select it",
     "F               follow selected",
     "V               agent's eyes",
+    "I               action icons",
     "+ / -           speed",
     "SPACE           pause",
     "M               minimap",
@@ -101,6 +108,9 @@ class Viewer:
         self.beasts = {size: animal_sprites(size) for size in ZOOMS}
         self.hazards = {size: disaster_sprites(size) for size in ZOOMS}
         self.farm = {size: farm_sprites(size) for size in ZOOMS}
+        self.shadows = {size: shadow_sprite(size) for size in ZOOMS}
+        self.icons = {size: icon_sprites(size) for size in ZOOMS}
+        self.show_icons = True
         self.hit_marks = []      # [x, y, frames left] red slashes where hits landed
         self.heart_marks = []    # [x, y, frames left] hearts where a child was conceived
         self.show_eyes = False
@@ -297,17 +307,31 @@ class Viewer:
         beasts = self.beasts[tile]
         animals_in_view = an.alive & (an.x >= first_x) & (an.x < last_x) & \
             (an.y >= first_y) & (an.y < last_y)
+        shadow = self.shadows[tile]
+        s = tile // PIXELS   # outlined sprites are drawn one art-pixel up and left
         for i in np.flatnonzero(animals_in_view):
-            self.screen.blit(beasts[an.species[i]], self.to_screen(an.x[i], an.y[i]))
+            px, py = self.to_screen(an.x[i], an.y[i])
+            self.screen.blit(shadow, (px, py))
+            self.screen.blit(beasts[an.species[i]], (px - s, py - s))
 
         weapons = self.farm[tile][2]
         adult_age = ADULT_AGE * TICKS_PER_YEAR
-        for i in np.flatnonzero(a.alive & in_view):
-            pos = self.to_screen(a.x[i], a.y[i])
+        icons = self.icons[tile]
+        living = np.flatnonzero(a.alive & in_view)
+        for i in living:
+            px, py = self.to_screen(a.x[i], a.y[i])
             kind = "child" if a.age[i] < adult_age else ("pregnant" if a.pregnant[i] else "adult")
-            self.screen.blit(people[(a.sex[i], kind)], pos)
+            self.screen.blit(shadow, (px, py))
+            self.screen.blit(people[(a.sex[i], kind)], (px - s, py - s))
             if a.weapon[i] != HANDS:
-                self.screen.blit(weapons[a.weapon[i]], pos)
+                self.screen.blit(weapons[a.weapon[i]], (px - s, py - s))
+        # Icons above heads for actions that just worked (drawn last so nothing covers them)
+        if self.show_icons:
+            for i in living:
+                if self.world.tick - a.did_tick[i] < ICON_TICKS and a.did[i] in ICON_FOR_ACTION:
+                    px, py = self.to_screen(a.x[i], a.y[i])
+                    icon = icons[ICON_FOR_ACTION[a.did[i]]]
+                    self.screen.blit(icon, (px + (tile - icon.get_width()) // 2, py - icon.get_height()))
 
         # Red slashes where hits landed
         for mark in self.hit_marks:
@@ -585,6 +609,8 @@ class Viewer:
                     self.turbo = not self.turbo
                 if event.key == pygame.K_v:
                     self.show_eyes = not self.show_eyes
+                if event.key == pygame.K_i:
+                    self.show_icons = not self.show_icons
                 if event.key == pygame.K_f and self.selected is not None:
                     self.following = not self.following
 

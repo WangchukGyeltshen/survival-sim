@@ -253,9 +253,10 @@ BONES = ["........",
          "........"]
 
 AGENT_PALETTES = {
-    0: {"h": (60, 40, 28), "s": (224, 172, 128), "t": (52, 92, 180), "p": (90, 62, 40)},    # male
-    1: {"h": (110, 56, 30), "s": (224, 172, 128), "t": (196, 64, 72), "p": (90, 62, 40)},  # female
+    0: {"h": (52, 34, 24), "s": (240, 186, 140), "t": (40, 110, 245), "p": (64, 44, 30)},    # male: bright blue
+    1: {"h": (120, 52, 24), "s": (240, 186, 140), "t": (235, 50, 80), "p": (64, 44, 30)},    # female: bright red
 }
+OUTLINE = (16, 12, 18)
 BONES_PALETTE = {"w": (232, 226, 210), "k": (40, 34, 34)}
 
 
@@ -267,6 +268,67 @@ def build_sprite(pattern, palette, tile_px):
             if ch != ".":
                 small.set_at((x, y), palette[ch])
     return pygame.transform.scale(small, (tile_px, tile_px))
+
+
+def build_outlined(pattern, palette, tile_px, outline=OUTLINE):
+    """A sprite with a 1-pixel dark outline, so it stands out from the ground.
+    The image is 1 art-pixel bigger on every side than a tile, so draw it
+    at (x - scale, y - scale) where scale = tile_px // PIXELS."""
+    size = PIXELS + 2
+    small = pygame.Surface((size, size), pygame.SRCALPHA)
+    filled = set()
+    for y, row in enumerate(pattern):
+        for x, ch in enumerate(row):
+            if ch != ".":
+                filled.add((x + 1, y + 1))
+                small.set_at((x + 1, y + 1), palette[ch])
+    for x, y in filled:
+        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            if (x + dx, y + dy) not in filled:
+                small.set_at((x + dx, y + dy), outline)
+    scale = tile_px // PIXELS
+    return pygame.transform.scale(small, (size * scale, size * scale))
+
+
+def shadow_sprite(tile_px):
+    """A soft dark oval drawn under feet."""
+    scale = tile_px // PIXELS
+    surf = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
+    pygame.draw.ellipse(surf, (0, 0, 0, 90), (scale, 6 * scale, 6 * scale, 2 * scale + 1))
+    return surf
+
+
+# Small icons shown above an agent's head when it does something
+ICONS = {
+    "drink": ["..b..", ".bbb.", "bbbbb", "bbbbb", ".bbb."],
+    "eat": ["...g.", ".rrr.", "rrrrr", "rrrrr", ".rrr."],
+    "attack": ["x...x", ".x.x.", "..x..", ".x.x.", "x...x"],
+    "pick up": ["..w..", ".www.", "w.w.w", "..w..", "..w.."],
+    "plant": ["g...g", ".g.g.", "..g..", "..g..", ".nnn."],
+    "craft": ["kkkk.", "kkkk.", "..n..", "..n..", "..n.."],
+    "mate": [".r.r.", "rrrrr", "rrrrr", ".rrr.", "..r.."],
+}
+ICON_PALETTE = {"b": (80, 170, 255), "r": (240, 60, 90), "g": (90, 200, 80), "x": (255, 70, 50),
+                "w": (250, 250, 250), "n": (150, 100, 50), "k": (180, 180, 190)}
+
+
+def icon_sprites(tile_px):
+    scale = tile_px // PIXELS
+    out = {}
+    for name, art in ICONS.items():
+        small = pygame.Surface((7, 7), pygame.SRCALPHA)
+        filled = set()
+        for y, row in enumerate(art):
+            for x, ch in enumerate(row):
+                if ch != ".":
+                    filled.add((x + 1, y + 1))
+                    small.set_at((x + 1, y + 1), ICON_PALETTE[ch])
+        for x, y in filled:
+            for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                if (x + dx, y + dy) not in filled:
+                    small.set_at((x + dx, y + dy), OUTLINE)
+        out[name] = pygame.transform.scale(small, (7 * scale, 7 * scale))
+    return out
 
 
 CHILD = ["........",
@@ -302,9 +364,9 @@ def agent_sprites(tile_px):
     where kind is "adult", "child" or "pregnant"."""
     people = {}
     for sex, pal in AGENT_PALETTES.items():
-        people[(sex, "adult")] = build_sprite(AGENT, pal, tile_px)
-        people[(sex, "child")] = build_sprite(CHILD, pal, tile_px)
-        people[(sex, "pregnant")] = build_sprite(PREGNANT, pal, tile_px)
+        people[(sex, "adult")] = build_outlined(AGENT, pal, tile_px)
+        people[(sex, "child")] = build_outlined(CHILD, pal, tile_px)
+        people[(sex, "pregnant")] = build_outlined(PREGNANT, pal, tile_px)
     bones = build_sprite(BONES, BONES_PALETTE, tile_px)
     heart = build_sprite(HEART, {"r": (240, 80, 120)}, tile_px)
     return people, bones, heart
@@ -359,7 +421,7 @@ WOLF_EYE = (2, 6)   # (row, column) of the wolf's eye, glows at night
 
 def animal_sprites(tile_px):
     """Returns a list of images, one per species, for one zoom level."""
-    return [build_sprite(art, ANIMAL_PALETTE, tile_px) for art in ANIMAL_ART]
+    return [build_outlined(art, ANIMAL_PALETTE, tile_px) for art in ANIMAL_ART]
 
 
 # ---------- disasters ----------
@@ -454,5 +516,5 @@ def farm_sprites(tile_px):
     """Crop overlays (young, growing, ripe), a pile image, and weapon overlays."""
     crops = [build_sprite(art, CROP_PALETTE, tile_px) for art in CROP_STAGES]
     pile = build_sprite(PILE_ART, PILE_PALETTE, tile_px)
-    weapons = {k: build_sprite(art, WEAPON_PALETTE, tile_px) for k, art in WEAPON_ART.items()}
+    weapons = {k: build_outlined(art, WEAPON_PALETTE, tile_px) for k, art in WEAPON_ART.items()}
     return crops, pile, weapons
