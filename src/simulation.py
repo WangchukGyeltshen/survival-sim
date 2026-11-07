@@ -1,6 +1,6 @@
 """Ties the world and the agents together and runs them one tick at a time."""
 
-from collections import Counter
+from collections import Counter, deque
 
 import numpy as np
 
@@ -10,6 +10,7 @@ from src.animals import Animals
 from src.disasters import Disasters
 
 START_AGENTS = 200
+LOG_LENGTH = 6000
 
 
 class Simulation:
@@ -22,6 +23,11 @@ class Simulation:
         self.deaths = Counter()   # cause of death -> how many
         self.discoveries = []     # (tick, message) the first time each activity happens
         self.policy = None        # a function(sim) -> actions; None means random
+        # Everything notable that happened, newest last: (tick, kind, agent, other).
+        # Only kept for the viewer's event log; it doesn't affect the simulation.
+        self.log = deque(maxlen=LOG_LENGTH)
+        self.log_count = 0        # total events ever added (lets the viewer find new ones)
+        self._disasters_seen = 0
 
     def choose_actions(self):
         """Ask the brain (if one is plugged in), otherwise act randomly."""
@@ -38,6 +44,7 @@ class Simulation:
         self.animals.step(self.agents)
         dead = self.agents.resolve_deaths()
         self.check_discoveries()
+        self.record_events()
         for i in np.flatnonzero(dead):
             self.deaths[DEATH_CAUSES[self.agents.cause_of_death[i]]] += 1
         self.world.step()
@@ -49,6 +56,20 @@ class Simulation:
             message = f"First time: {activity}"
             if message not in known:
                 self.discoveries.append((self.world.tick, message))
+                self.add_log(self.world.tick, "discovery", -1, message)
+
+    def record_events(self):
+        tick = self.world.tick
+        for kind, agent, other in self.agents.events:
+            self.add_log(tick, kind, agent, other)
+        new = self.disasters.events[self._disasters_seen:]
+        self._disasters_seen = len(self.disasters.events)
+        for _, message in new:
+            self.add_log(tick, "disaster", -1, message)
+
+    def add_log(self, tick, kind, agent, other):
+        self.log.append((tick, kind, agent, other))
+        self.log_count += 1
 
     @property
     def tick(self):

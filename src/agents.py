@@ -205,6 +205,7 @@ class Agents:
         self.hearts = []          # (x, y) of every conception this tick, for the viewer
         self.births = 0
         self.new_parents = []     # (mother, father) of every child born this tick
+        self.events = []          # (kind, agent, other) of everything notable this tick, for the log
 
         self.last_action = np.zeros(n, dtype=np.int8)
         self.did = np.full(n, -1, dtype=np.int8)        # last action that actually worked...
@@ -295,6 +296,7 @@ class Agents:
         self.last_action[alive] = a[alive]
         self.prev_health[:] = self.health
         self.new_parents = []
+        self.events = []
 
         # Exhausted agents (no energy) cannot move, so their move becomes rest
         tired = self.energy <= 0
@@ -373,10 +375,15 @@ class Agents:
             self.water[drinking[near_water]] += DRINK_WATER
             self.did[drinking[near_water]] = DRINK
             self.did_tick[drinking[near_water]] = world.tick
+            for k, drinker in enumerate(drinking):
+                if near_water[k]:
+                    self.log_event("drank", drinker, "water" if clean[k] else "pond water")
             # Only pond water nearby: it might make you sick
             dirty = drinking[near_water & ~clean]
             unlucky = dirty[self.rng.random(len(dirty)) < POND_SICK_CHANCE]
             self.sick[unlucky] = SICK_TICKS
+            for k in unlucky:
+                self.log_event("got sick", k)
 
         # ----- body needs -----
         self.food[alive] -= self.food_use()[alive]
@@ -459,6 +466,7 @@ class Agents:
                     self.energy[[f, m]] -= MATE_ENERGY
                     self.hearts.append((int(self.x[f]), int(self.y[f])))
                     self.counts["conceived child"] += 1
+                    self.log_event("conceived", f, int(m))
                     self.success(f, MATE)
                     self.success(m, MATE)
                     pending += 1
@@ -490,9 +498,15 @@ class Agents:
                 self.children[m] += 1
             self.births += 1
             self.counts["child born"] += 1
+            self.log_event("born", child, int(f))
             self.new_parents.append((int(f), int(m)))
         if self.rng.random() < CHILDBIRTH_RISK:
             self.hurt(f, INSTANT_DEATH, CHILDBIRTH)
+
+    def log_event(self, kind, agent, other=None):
+        """Note something that happened, for the event log in the viewer.
+        (Only used for display; it never affects the simulation.)"""
+        self.events.append((kind, int(agent), other))
 
     def success(self, i, action):
         """Remember that agent i's action worked (shown as an icon in the viewer)."""
@@ -516,16 +530,20 @@ class Agents:
                 self.food[i] += CROP_FOOD
                 self.give_seed(i, SEED_FROM_CROP)
                 self.counts["ate crop"] += 1
+                self.log_event("ate", i, "a crop")
             elif w.poison[y, x]:
                 self.food[i] += POISON_FOOD
                 self.hurt(i, POISON_DAMAGE, POISON)
+                self.log_event("poisoned", i)
             else:
                 self.food[i] += BERRY_FOOD
                 self.give_seed(i, SEED_FROM_BERRY)
+                self.log_event("ate", i, "berries")
         elif self.inv["meat"][i] > 0:
             self.inv["meat"][i] -= 1
             self.food[i] += MEAT_FOOD
             self.counts["ate meat"] += 1
+            self.log_event("ate", i, "meat")
         elif self.inv["berries"][i] > 0:
             # Carried berries all look alike; a poisonous one may come out
             poisoned = self.rng.random() < self.inv_poison[i] / self.inv["berries"][i]
@@ -534,8 +552,10 @@ class Agents:
                 self.inv_poison[i] -= 1
                 self.food[i] += POISON_FOOD
                 self.hurt(i, POISON_DAMAGE, POISON)
+                self.log_event("poisoned", i)
             else:
                 self.food[i] += BERRY_FOOD
+                self.log_event("ate", i, "carried berries")
 
     def give_seed(self, i, chance):
         if self.rng.random() < chance and self.inv["seeds"][i] < CARRY_LIMIT["seeds"]:
@@ -572,16 +592,22 @@ class Agents:
                 self.inv_poison[i] += 1
             if w.terrain[y, x] == FARMLAND:
                 self.counts["harvested crop"] += 1
+                self.log_event("harvested", i)
+            else:
+                self.log_event("picked up", i, "a berry")
         elif w.terrain[y, x] == FOREST:
             if self.weapon[i] == HANDS:
                 self.weapon[i], self.weapon_uses[i] = STICK, WEAPON_USES[STICK]
                 self.counts["picked up stick"] += 1
+                self.log_event("picked up", i, "a stick to fight with")
             elif self.room(i, "sticks") > 0:
                 self.inv["sticks"][i] += 1
                 self.counts["picked up stick"] += 1
+                self.log_event("picked up", i, "a stick")
         elif self.near_rock(i) and self.room(i, "stones") > 0:
             self.inv["stones"][i] += 1
             self.counts["picked up stone"] += 1
+            self.log_event("picked up", i, "a stone")
 
     def take_pile(self, i, x, y):
         pile = self.world.piles[(x, y)]
@@ -599,6 +625,7 @@ class Agents:
             self.weapon[i], self.weapon_uses[i] = pile["weapon"], pile["weapon_uses"]
             pile["weapon"], pile["weapon_uses"] = old, old_uses
         self.counts["took from pile"] += 1
+        self.log_event("looted", i)
         self.world.clean_pile(x, y)
 
     def plant(self, i):
@@ -610,6 +637,7 @@ class Agents:
             w.crop[y, x] = CROP_GROW_TICKS
             w.berries[y, x] = 0
             self.counts["planted seed"] += 1
+            self.log_event("planted", i)
             self.success(i, PLANT)
 
     def craft(self, i):
@@ -618,6 +646,7 @@ class Agents:
             self.inv["sticks"][i] -= 1
             self.weapon[i], self.weapon_uses[i] = SPEAR, WEAPON_USES[SPEAR]
             self.counts["crafted spear"] += 1
+            self.log_event("crafted", i, "a spear")
             self.success(i, CRAFT)
         elif self.weapon[i] < SHARP_STONE and self.inv["stones"][i] > 0 and self.near_rock(i):
             self.inv["stones"][i] -= 1
@@ -625,6 +654,7 @@ class Agents:
                 self.inv["sticks"][i] += 1   # keep the stick for later
             self.weapon[i], self.weapon_uses[i] = SHARP_STONE, WEAPON_USES[SHARP_STONE]
             self.counts["crafted sharp stone"] += 1
+            self.log_event("crafted", i, "a sharp stone")
             self.success(i, CRAFT)
 
     def strike(self, i):
@@ -639,6 +669,7 @@ class Agents:
             if self.weapon_uses[i] <= 0:
                 self.weapon[i] = HANDS
                 self.counts["weapon broke"] += 1
+                self.log_event("weapon broke", i, WEAPON_NAMES[weapon])
         return damage
 
     def attack_animal(self, i, animals):
@@ -655,6 +686,7 @@ class Agents:
         self.hits.append((int(animals.x[j]), int(animals.y[j])))
         self.success(i, ATTACK_ANIMAL)
         meat = animals.hit_by_agent(j, damage, i, self)
+        self.log_event("hunted" if meat else "hit animal", i, animals.name(kind))
         if meat:
             self.counts[f"hunted {animals.name(kind)}"] += 1
             take = min(meat, self.room(i, "meat"))
@@ -674,9 +706,11 @@ class Agents:
         self.hits.append((int(self.x[j]), int(self.y[j])))
         self.success(i, ATTACK_PERSON)
         self.counts["attacked person"] += 1
+        self.log_event("attacked", i, int(j))
         if self.health[j] <= 0:
             self.kills[i] += 1
             self.counts["killed person"] += 1
+            self.log_event("killed", i, int(j))
 
     def update_warmth(self, alive, disasters):
         world = self.world
@@ -715,6 +749,8 @@ class Agents:
             self.cause_of_death[dead] = self.last_hurt_by[dead]
             self.death_tick[dead] = self.world.tick
             self.alive[dead] = False
+            for i in np.flatnonzero(dead):
+                self.log_event("died", i, DEATH_CAUSES[self.cause_of_death[i]])
         return dead
 
     def drop_everything(self, i):

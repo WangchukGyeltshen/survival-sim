@@ -1,304 +1,503 @@
-"""Pixel-art tiles, drawn in code (no image files needed).
+"""Pixel art for everything in the game, drawn in code (no image files needed).
 
-Each tile is an 8 x 8 grid of letters. Each letter is a colour from a palette.
-The tiles are then scaled up so every "pixel" becomes a chunky square.
+Every tile and sprite is a 16 x 16 grid of letters, where each letter is a
+colour from a palette ("." means see-through). Some tiles (grass, water, rock)
+are generated with a little randomness so neighbouring tiles don't look
+identical; the rest are drawn by hand below. The grids are then scaled up so
+each art pixel becomes a chunky square on screen.
 """
+
+import random
 
 import pygame
 
 from src.world import (GRASS, FOREST, ROCK, RIVER, POND, CAVE,
                        DEEP_WATER, CLIFF, FARMLAND)
 
-PIXELS = 8   # each tile is 8 x 8 pixel-art pixels
+PIXELS = 16   # art pixels per tile side
+OUTLINE = (16, 12, 18)
 
-# ---------- colour palettes ----------
+# ======================================================================
+# colours
+# ======================================================================
 SUMMER = {
-    "G": (106, 168, 79),   # grass
-    "g": (139, 196, 98),   # grass tuft
-    "y": (242, 214, 85),   # flower
-    "L": (47, 112, 58),    # tree leaves
-    "l": (78, 150, 74),    # leaf highlight
-    "d": (30, 78, 44),     # leaf shadow
-    "b": (110, 74, 44),    # trunk
-    "R": (128, 128, 136),  # rock
-    "r": (164, 164, 172),  # rock highlight
-    "k": (88, 88, 98),     # rock shadow
-    "K": (28, 22, 26),     # cave darkness
-    "W": (58, 128, 212),   # river
-    "w": (138, 190, 240),  # river ripple
-    "P": (52, 96, 120),    # pond
-    "p": (92, 140, 160),   # pond ripple
-    "n": (84, 150, 70),    # lily pad
-    "D": (30, 66, 140),    # deep water
-    "e": (54, 98, 176),    # deep water wave
-    "c": (70, 58, 56),     # cliff face
-    "C": (46, 36, 36),     # cliff face shadow
-    "f": (122, 86, 54),    # farmland soil
-    "F": (92, 62, 40),     # farmland furrow
+    "G": (104, 168, 76), "g": (138, 198, 96), "d": (82, 140, 60),            # grass
+    "Y": (246, 214, 84), "M": (240, 240, 236), "Q": (226, 110, 150),         # flowers
+    "L": (46, 112, 56), "l": (80, 154, 72), "D": (30, 80, 44),               # leaves
+    "b": (112, 76, 44), "B": (82, 54, 30),                                    # trunk
+    "R": (128, 128, 138), "r": (168, 168, 178), "k": (90, 90, 102),          # rock
+    "K": (26, 20, 24), "c": (88, 74, 70), "C": (58, 46, 46),                 # cave, cliff
+    "W": (58, 128, 212), "x": (140, 194, 242), "X": (44, 104, 184),          # river
+    "O": (30, 66, 140), "o": (60, 104, 180),                                  # deep water
+    "P": (52, 98, 122), "p": (92, 142, 162),                                  # pond
+    "n": (70, 140, 64), "N": (50, 110, 50), "q": (240, 150, 180),            # lily pads
+    "f": (128, 90, 56), "F": (96, 64, 40), "h": (150, 110, 72),              # farmland
+    "a": (64, 60, 58), "A": (96, 90, 84), "E": (220, 100, 40),               # ash
 }
-
 WINTER = dict(SUMMER)
 WINTER.update({
-    "G": (222, 230, 238),  # snow
-    "g": (190, 204, 220),  # snow shadow
-    "y": (190, 204, 220),  # no flowers in winter
-    "L": (44, 92, 70),     # darker, colder leaves
-    "l": (240, 246, 250),  # snow on leaves
-    "r": (230, 236, 242),  # snow on rock
-    "W": (96, 150, 205),
-    "P": (110, 140, 160),
-    "n": (110, 140, 160),
-    "D": (60, 92, 150),
-    "f": (200, 196, 196),  # snow on soil
+    "G": (222, 230, 238), "g": (242, 246, 250), "d": (190, 204, 220),
+    "Y": (200, 212, 226), "M": (242, 246, 250), "Q": (200, 212, 226),
+    "L": (44, 92, 70), "l": (236, 242, 248), "D": (28, 64, 50),
+    "R": (140, 140, 150), "r": (232, 238, 244),
+    "W": (96, 150, 205), "x": (200, 224, 244), "X": (80, 130, 190),
+    "O": (60, 92, 150), "o": (100, 136, 190),
+    "P": (110, 140, 160), "p": (150, 176, 192), "n": (110, 140, 160), "N": (100, 128, 148),
+    "q": (110, 140, 160),
+    "f": (200, 196, 196), "F": (170, 166, 170), "h": (222, 220, 222),
 })
 
-# ---------- tile patterns ----------
-GRASS_TILES = [
-    ["GGGGGGGG",
-     "GGgGGGGG",
-     "GgGgGGGG",
-     "GGGGGGGG",
-     "GGGGGgGG",
-     "GGGGgGgG",
-     "GGGGGGGG",
-     "GGGGGGGG"],
-    ["GGGGGGGG",
-     "GGGGGGgG",
-     "GGGGGgGG",
-     "GGGGGGGG",
-     "GgGGGGGG",
-     "gGgGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG"],
-    ["GGGGGGGG",
-     "GGGGGGGG",
-     "GGGyGGGG",
-     "GGygyGGG",
-     "GGGyGGGG",
-     "GGGGGGgG",
-     "GGGGGgGg",
-     "GGGGGGGG"],
-    ["GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG",
-     "GGGGGGGG"],
-]
-
-TREE = ["GGLLLLGG",
-        "GLllLLLG",
-        "LlLLLLLd",
-        "LLLLLLLd",
-        "LLLLLLdd",
-        "GdLLLddG",
-        "GGGbbGGG",
-        "GGGbbGGG"]
-
-# Where berries appear on the tree (row, column), one spot per berry
-BERRY_SPOTS = [(1, 5), (2, 3), (3, 1), (3, 5), (5, 3)]
 BERRY_COLOUR = (214, 40, 64)
-POISON_COLOUR = (190, 90, 255)   # poisonous berries are purple
-
-ROCK_TILE = ["rrRRRRRr",
-             "rRRRRkRR",
-             "RRRRkRRR",
-             "RRRRRRRk",
-             "RkRRRRRR",
-             "RRkRRRrR",
-             "RRRRRRRR",
-             "kRRRRkRk"]
-
-CAVE_TILE = ["rrRRRRRr",
-             "rRRkkkRR",
-             "RRkKKKkR",
-             "RkKKKKKk",
-             "RkKKKKKk",
-             "RkKKKKKk",
-             "RkKKKKKk",
-             "kkKKKKKk"]
-
-WATER = ["WWWWWWWW",
-         "WwwWWWWW",
-         "WWWWWWWW",
-         "WWWWWwwW",
-         "WWWWWWWW",
-         "WWwwWWWW",
-         "WWWWWWWW",
-         "WWWWWWww"]
-
-POND_TILE = ["PPPPPPPP",
-             "PppPPPPP",
-             "PPPPPPPP",
-             "PPPPnnPP",
-             "PPPnnnPP",
-             "PPPPPPPP",
-             "PPPPPppP",
-             "PPPPPPPP"]
+BERRY_SHINE = (255, 150, 160)
+POISON_COLOUR = (180, 80, 255)    # poisonous berries are purple
+POISON_SHINE = (230, 190, 255)
 
 
-DEEP_TILE = ["DDDDDDDD",
-             "DDDeeDDD",
-             "DDDDDDDD",
-             "DDDDDDDD",
-             "eeDDDDDD",
-             "DDDDDDDD",
-             "DDDDDDeD",
-             "DDDDDDDD"]
-
-CLIFF_TILE = ["rrRRRRrr",
-              "RRRRRRRR",
-              "kkkkkkkk",
-              "cCccCccC",
-              "ccCcccCc",
-              "CccCccCc",
-              "cCccCcCC",
-              "CCcCCCCC"]
-
-FARM_TILE = ["ffffffff",
-             "FFFFFFFF",
-             "ffffffff",
-             "ffffffff",
-             "FFFFFFFF",
-             "ffffffff",
-             "ffffffff",
-             "FFFFFFFF"]
+def grid(fill="."):
+    return [[fill] * PIXELS for _ in range(PIXELS)]
 
 
-def shift(pattern, amount):
-    """Slide each row sideways (used to animate water ripples)."""
-    return [row[-amount:] + row[:-amount] for row in pattern]
+def rows(g):
+    return ["".join(r) for r in g]
 
 
-class SpriteSheet:
-    """Turns the letter patterns into scaled-up pygame images, cached for speed."""
-
-    def __init__(self, tile_px):
-        self.tile_px = tile_px
-        self.scale = tile_px // PIXELS
-        self.cache = {}
-
-    def _build(self, pattern, palette):
-        small = pygame.Surface((PIXELS, PIXELS))
-        for y, row in enumerate(pattern):
-            for x, ch in enumerate(row):
-                small.set_at((x, y), palette[ch])
-        # Plain scaling keeps the hard pixel edges (no blurring)
-        return pygame.transform.scale(small, (self.tile_px, self.tile_px))
-
-    def get(self, kind, variant, winter, frame):
-        key = (kind, variant, winter, frame)
-        if key not in self.cache:
-            palette = WINTER if winter else SUMMER
-            if kind == GRASS:
-                # Variants 0-2 are tufts and flowers, anything higher is plain grass
-                pattern = GRASS_TILES[min(variant, 3)]
-            elif kind == FOREST:
-                pattern = TREE
-            elif kind == ROCK:
-                pattern = ROCK_TILE
-            elif kind == CAVE:
-                pattern = CAVE_TILE
-            elif kind == RIVER:
-                pattern = shift(WATER, frame)
-            elif kind == DEEP_WATER:
-                pattern = shift(DEEP_TILE, frame)
-            elif kind == CLIFF:
-                pattern = CLIFF_TILE
-            elif kind == FARMLAND:
-                pattern = FARM_TILE
-            else:  # POND
-                pattern = shift(POND_TILE, frame) if frame else POND_TILE
-            self.cache[key] = self._build(pattern, palette)
-        return self.cache[key]
-
-    def draw_berries(self, screen, px, py, count, poison=False):
-        size = self.scale
-        colour = POISON_COLOUR if poison else BERRY_COLOUR
-        for row, col in BERRY_SPOTS[:count]:
-            pygame.draw.rect(screen, colour,
-                             (px + col * size, py + row * size, size, size))
+def check(art, name):
+    assert len(art) == PIXELS and all(len(r) == PIXELS for r in art), f"{name} is not 16x16"
+    return art
 
 
-# One colour per terrain type for the minimap
-MINIMAP_KEYS = {GRASS: "G", FOREST: "L", ROCK: "R", RIVER: "W", POND: "P",
-                CAVE: "K", DEEP_WATER: "D", CLIFF: "C", FARMLAND: "f"}
-
-
-def minimap_colour(kind, winter):
-    palette = WINTER if winter else SUMMER
-    return palette[MINIMAP_KEYS[kind]]
-
-
-# ---------- agents ----------
-# "." means see-through
-AGENT = ["..hhhh..",
-         "..hssh..",
-         "..ssss..",
-         ".tttttt.",
-         "s.tttt.s",
-         "..tttt..",
-         "..p..p..",
-         "..p..p.."]
-
-BONES = ["........",
-         "..wwww..",
-         ".wwwwww.",
-         ".wkwwkw.",
-         ".wwwwww.",
-         "..wkkw..",
-         "..wwww..",
-         "........"]
-
-AGENT_PALETTES = {
-    0: {"h": (52, 34, 24), "s": (240, 186, 140), "t": (40, 110, 245), "p": (64, 44, 30)},    # male: bright blue
-    1: {"h": (120, 52, 24), "s": (240, 186, 140), "t": (235, 50, 80), "p": (64, 44, 30)},    # female: bright red
-}
-OUTLINE = (16, 12, 18)
-BONES_PALETTE = {"w": (232, 226, 210), "k": (40, 34, 34)}
-
-
-def build_sprite(pattern, palette, tile_px):
-    """Like SpriteSheet._build but with see-through pixels."""
-    small = pygame.Surface((PIXELS, PIXELS), pygame.SRCALPHA)
-    for y, row in enumerate(pattern):
-        for x, ch in enumerate(row):
-            if ch != ".":
-                small.set_at((x, y), palette[ch])
-    return pygame.transform.scale(small, (tile_px, tile_px))
-
-
-def build_outlined(pattern, palette, tile_px, outline=OUTLINE):
-    """A sprite with a 1-pixel dark outline, so it stands out from the ground.
-    The image is 1 art-pixel bigger on every side than a tile, so draw it
-    at (x - scale, y - scale) where scale = tile_px // PIXELS."""
-    size = PIXELS + 2
-    small = pygame.Surface((size, size), pygame.SRCALPHA)
-    filled = set()
-    for y, row in enumerate(pattern):
-        for x, ch in enumerate(row):
-            if ch != ".":
-                filled.add((x + 1, y + 1))
-                small.set_at((x + 1, y + 1), palette[ch])
-    for x, y in filled:
+# ======================================================================
+# generated terrain tiles
+# ======================================================================
+def grass_art(variant):
+    rng = random.Random(1000 + variant)
+    g = grid("G")
+    for _ in range(14):
+        g[rng.randrange(16)][rng.randrange(16)] = "d"
+    for _ in range(10):
+        g[rng.randrange(16)][rng.randrange(16)] = "g"
+    for _ in range(3 if variant % 3 else 2):               # little tufts of grass
+        x, y = rng.randrange(1, 15), rng.randrange(2, 15)
+        g[y][x] = "g"
+        g[y - 1][x] = "g"
+        g[y][x - 1] = "d"
+        g[y][x + 1] = "d"
+    if variant in (2, 6):                                  # a flower
+        x, y = rng.randrange(2, 14), rng.randrange(2, 14)
+        petal = "Y" if variant == 2 else "Q"
         for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            if (x + dx, y + dy) not in filled:
-                small.set_at((x + dx, y + dy), outline)
-    scale = tile_px // PIXELS
-    return pygame.transform.scale(small, (size * scale, size * scale))
+            g[y + dy][x + dx] = petal
+        g[y][x] = "M" if variant == 2 else "Y"
+    return rows(g)
 
 
-def shadow_sprite(tile_px):
-    """A soft dark oval drawn under feet."""
-    scale = tile_px // PIXELS
-    surf = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
-    pygame.draw.ellipse(surf, (0, 0, 0, 90), (scale, 6 * scale, 6 * scale, 2 * scale + 1))
-    return surf
+def water_art(frame, base, light, dark, waves):
+    rng = random.Random(7 if base == "W" else 9)
+    g = grid(base)
+    for _ in range(waves):
+        y = rng.randrange(1, 15)
+        x = (rng.randrange(16) + frame * 2) % 16
+        length = rng.randrange(2, 5)
+        for k in range(length):
+            g[y][(x + k) % 16] = light
+            g[y + 1][(x + k + 1) % 16] = dark
+    return rows(g)
 
 
-# Small icons shown above an agent's head when it does something
+def pond_art(frame):
+    g = [list(r) for r in water_art(frame, "P", "p", "P", 4)]
+    for x, y in ((3, 4), (10, 9)):                         # lily pads
+        for dx, dy in ((0, 0), (1, 0), (2, 0), (0, 1), (1, 1), (2, 1)):
+            g[y + dy][x + dx] = "n"
+        g[y][x + 1] = "N"
+    g[9][11] = "q"
+    return rows(g)
+
+
+def rock_art(variant):
+    rng = random.Random(500 + variant)
+    g = grid("R")
+    for _ in range(18):
+        g[rng.randrange(16)][rng.randrange(16)] = "k"
+    # a few boulders: light top-left edge, dark bottom-right edge
+    for _ in range(3):
+        cx, cy, r = rng.randrange(3, 13), rng.randrange(3, 13), rng.randrange(2, 4)
+        for y in range(cy - r, cy + r + 1):
+            for x in range(cx - r, cx + r + 1):
+                if 0 <= x < 16 and 0 <= y < 16:
+                    d = (x - cx) ** 2 + (y - cy) ** 2
+                    if d <= r * r:
+                        if d >= (r - 1) ** 2:
+                            g[y][x] = "r" if (x <= cx and y <= cy) else "k"
+                        else:
+                            g[y][x] = "R"
+    return rows(g)
+
+
+def cave_art(variant):
+    g = [list(r) for r in rock_art(variant)]
+    for y in range(5, 16):
+        for x in range(2, 14):
+            # an arch: round top, straight sides
+            if (x - 7.5) ** 2 / 30 + (y - 9) ** 2 / 18 <= 1 or (y >= 9 and 3 <= x <= 12):
+                g[y][x] = "K"
+    for y in range(5, 16):           # rim around the opening
+        for x in range(1, 15):
+            if g[y][x] != "K" and any(0 <= x + dx < 16 and 0 <= y + dy < 16 and g[y + dy][x + dx] == "K"
+                                      for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1))):
+                g[y][x] = "k"
+    return rows(g)
+
+
+def cliff_art(variant):
+    rng = random.Random(800 + variant)
+    g = [list(r) for r in rock_art(variant)]
+    for x in range(16):
+        g[4][x] = "r"                 # the edge
+        g[5][x] = "k"
+        for y in range(6, 16):
+            g[y][x] = "c"
+    for _ in range(5):               # cracks running down the face
+        x = rng.randrange(16)
+        for y in range(6, 16):
+            if rng.random() < 0.85:
+                g[y][x] = "C"
+            x = max(0, min(15, x + rng.choice((-1, 0, 0, 1))))
+    return rows(g)
+
+
+def farm_art():
+    g = grid("f")
+    for y in (3, 7, 11, 15):
+        for x in range(16):
+            g[y][x] = "F"
+            g[y - 1][x] = "h" if x % 5 else "f"
+    return rows(g)
+
+
+def ash_art():
+    rng = random.Random(3)
+    g = grid("a")
+    for _ in range(30):
+        g[rng.randrange(16)][rng.randrange(16)] = "A"
+    for _ in range(4):
+        g[rng.randrange(16)][rng.randrange(16)] = "E"
+    return rows(g)
+
+
+# ======================================================================
+# hand-drawn art
+# ======================================================================
+TREE = check([
+    ".....LLLLLL.....",
+    "...LLlllLLLLL...",
+    "..LlllLLLLLLLL..",
+    ".LLllLLLLLLLLDL.",
+    ".LlLLLLLLLLLLDD.",
+    "LLLLLLLLLLLLLLDD",
+    "LLLLLLLLLLLLLDDD",
+    "LLLLLLLLLLLLDDDD",
+    ".LLLLLLLLLLDDDD.",
+    ".DLLLLLLLLDDDDD.",
+    "..DDLLLLDDDDDD..",
+    "...DDDDDDDDDD...",
+    "......bbbB......",
+    "......bbbB......",
+    "......bbBB......",
+    ".....bbbbBB.....",
+], "tree")
+BERRY_SPOTS = [(3, 6), (5, 10), (7, 3), (7, 8), (9, 5)]   # (row, col) on the tree
+
+# ---------- people ----------
+MAN = check([
+    "................",
+    "......hhhh......",
+    ".....hhhhhh.....",
+    ".....hssssh.....",
+    ".....sesses.....",
+    "......ssss......",
+    ".......ss.......",
+    ".....tttttt.....",
+    "....tttttttt....",
+    "...stuttttuts...",
+    "...s.tttttt.s...",
+    ".....vvvvvv.....",
+    ".....pp..pp.....",
+    ".....pp..pp.....",
+    ".....pp..pp.....",
+    ".....ff..ff.....",
+], "man")
+WOMAN = check([
+    "................",
+    "......hhhh......",
+    ".....hhhhhh.....",
+    "....hhsssshh....",
+    "....hsessesh....",
+    "....hhsssshh....",
+    ".....h.ss.h.....",
+    ".....tttttt.....",
+    "....tttttttt....",
+    "...stuttttuts...",
+    "...s.tttttt.s...",
+    "....tttttttt....",
+    "...tttttttttt...",
+    "...uuuuuuuuuu...",
+    "......s..s......",
+    ".....ff..ff.....",
+], "woman")
+PREGNANT = check([
+    "................",
+    "......hhhh......",
+    ".....hhhhhh.....",
+    "....hhsssshh....",
+    "....hsessesh....",
+    "....hhsssshh....",
+    ".....h.ss.h.....",
+    ".....tttttt.....",
+    "....tttttttt....",
+    "...stuttttutt...",
+    "...s.ttttttttt..",
+    "....tttttttttt..",
+    "...tttttttttt...",
+    "...uuuuuuuuuu...",
+    "......s..s......",
+    ".....ff..ff.....",
+], "pregnant")
+CHILD = check([
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "......hhhh......",
+    "......hssh......",
+    "......sees......",
+    ".......ss.......",
+    "......tttt......",
+    ".....stttts.....",
+    "......tttt......",
+    "......p..p......",
+    "......p..p......",
+    "......f..f......",
+], "child")
+BONES = check([
+    "................",
+    "................",
+    "................",
+    ".....wwwwww.....",
+    "....wwwwwwww....",
+    "....wkkwwkkw....",
+    "....wkkwwkkw....",
+    "....wwwwwwww....",
+    ".....wwkkww.....",
+    "......wwww......",
+    "...ww......ww...",
+    ".....ww..ww.....",
+    ".......ww.......",
+    ".....ww..ww.....",
+    "...ww......ww...",
+    "................",
+], "bones")
+HEART = check([
+    "................",
+    "................",
+    "....rrr..rrr....",
+    "...rRrrrrrrrr...",
+    "...rrrrrrrrrr...",
+    "....rrrrrrrr....",
+    ".....rrrrrr.....",
+    "......rrrr......",
+    ".......rr.......",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+], "heart")
+
+SKIN_TONES = [(244, 204, 166), (222, 168, 122), (176, 122, 84), (122, 82, 56)]
+HAIR_COLOURS = [(36, 28, 24), (84, 54, 32), (150, 76, 36), (214, 178, 100), (120, 120, 126)]
+CLOTHES = {   # tunic / dress colour and its shade
+    0: ((40, 110, 245), (26, 76, 190)),    # men: blue
+    1: ((235, 50, 80), (180, 30, 60)),     # women: red
+}
+PEOPLE_FIXED = {"e": (30, 24, 24), "p": (70, 52, 40), "f": (44, 32, 24), "v": (110, 76, 40)}
+
+# ---------- animals ----------
+RABBIT_ART = check([
+    "................",
+    "................",
+    "................",
+    "................",
+    "..........ee....",
+    "..........eq....",
+    ".........eeq....",
+    ".........ee.....",
+    "........eeee....",
+    ".......eeeeke...",
+    "...weeeeeeeen...",
+    "..wweeeeeeee....",
+    "...eeeeeeeee....",
+    "...eeE...eeE....",
+    "................",
+    "................",
+], "rabbit")
+DEER_ART = check([
+    "..........a..a..",
+    "...........aa...",
+    "...........dd...",
+    "...........ddk..",
+    "..........ddddn.",
+    "..........dd....",
+    "..dddddddddd....",
+    ".ddddddddddd....",
+    "dddddddddddd....",
+    ".dllllllllld....",
+    "..d.d....d.d....",
+    "..d.d....d.d....",
+    "..d.d....d.d....",
+    "..H.H....H.H....",
+    "................",
+    "................",
+], "deer")
+WOLF_ART = check([
+    "................",
+    "................",
+    "................",
+    "...........g.g..",
+    "..........gggg..",
+    "..........ggkgG.",
+    "g.........gggGG.",
+    "gg..gggggggggg..",
+    ".ggggggggggggg..",
+    "..gggggggggggg..",
+    "..GGGGGGGGGGG...",
+    "..g.g.....g.g...",
+    "..g.g.....g.g...",
+    "..G.G.....G.G...",
+    "................",
+    "................",
+], "wolf")
+BEAR_ART = check([
+    "................",
+    "................",
+    "................",
+    "...........BB...",
+    "..BBBBBBBBBBBBB.",
+    ".BBBBBBBBBBBkBB.",
+    "BBBBBBBBBBBBBnn.",
+    "BBBBBBBBBBBBBB..",
+    "BBBBBBBBBBBBBB..",
+    "BuuuuuuuuuuuBB..",
+    ".BB.BB...BB.BB..",
+    ".BB.BB...BB.BB..",
+    ".BB.BB...BB.BB..",
+    ".KK.KK...KK.KK..",
+    "................",
+    "................",
+], "bear")
+ANIMAL_PALETTE = {
+    "e": (176, 150, 120), "q": (232, 160, 170), "k": (20, 18, 18), "n": (60, 40, 40),
+    "w": (245, 245, 240), "E": (130, 108, 86),
+    "d": (176, 112, 60), "l": (236, 214, 180), "a": (226, 206, 160), "H": (60, 40, 30),
+    "g": (150, 150, 158), "G": (98, 98, 108),
+    "B": (88, 58, 36), "u": (124, 88, 58), "K": (40, 30, 24),
+}
+ANIMAL_ART = [RABBIT_ART, DEER_ART, WOLF_ART, BEAR_ART]   # same order as species numbers
+WOLF_EYE = (5, 12)   # (row, column) of the wolf's eye, glows at night
+
+# ---------- items ----------
+PILE_ART = check([
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    "..........n.....",
+    "......nnn.n.....",
+    ".....nmmmnn.....",
+    "....nmmMmmmn....",
+    "...nmmmmmmmmn...",
+    "....nnnnnnnn....",
+    "................",
+    "................",
+], "pile")
+PILE_PALETTE = {"n": (120, 84, 50), "m": (200, 110, 100), "M": (240, 170, 160)}
+
+
+def weapon_art(kind):
+    g = grid()
+    if kind == 1:      # stick
+        for y in range(3, 14):
+            g[y][13] = "n" if y % 3 else "N"
+    elif kind == 2:    # sharp stone in the hand
+        for y, x in ((9, 13), (10, 12), (10, 13), (10, 14), (11, 13), (11, 14)):
+            g[y][x] = "g"
+        g[9][13] = "G"
+    else:              # spear: long shaft with a stone tip
+        for y in range(3, 15):
+            g[y][13] = "n" if y % 3 else "N"
+        for y, x in ((0, 13), (1, 12), (1, 13), (1, 14), (2, 13)):
+            g[y][x] = "g"
+        g[0][13] = "G"
+    return rows(g)
+
+
+WEAPON_PALETTE = {"n": (150, 100, 50), "N": (110, 72, 36), "g": (200, 200, 210), "G": (250, 250, 255)}
+
+
+def crop_art(stage):
+    g = grid()
+    for c in (2, 6, 10, 14):
+        for base in (2, 6, 10, 14):           # just above each furrow
+            if stage == 0:                    # young sprouts
+                g[base][c] = "s"
+                g[base - 1][c - 1] = "s"
+                g[base - 1][c + 1 if c < 15 else c] = "s"
+            elif stage == 1:                  # growing stalks
+                g[base][c] = "S"
+                g[base - 1][c] = "s"
+                g[base - 2][c - 1] = "s"
+                g[base - 2][c + 1 if c < 15 else c] = "s"
+            else:                             # ripe golden grain
+                g[base][c] = "S"
+                g[base - 1][c] = "y"
+                g[base - 2][c] = "Y"
+                g[base - 2][c - 1] = "y"
+                g[base - 2][c + 1 if c < 15 else c] = "y"
+    return rows(g)
+
+
+CROP_PALETTE = {"s": (110, 190, 72), "S": (70, 140, 50), "y": (244, 208, 90), "Y": (255, 236, 150)}
+
+
+def fire_art(frame):
+    rng = random.Random(40 + frame)
+    g = grid()
+    for x in range(1, 15):
+        height = 5 + int(6 * (1 - abs(x - 7.5) / 8)) + rng.randrange(0, 4)
+        for k in range(height):
+            y = 15 - k
+            if k < height * 0.35:
+                g[y][x] = "R"
+            elif k < height * 0.65:
+                g[y][x] = "r"
+            elif k < height * 0.9:
+                g[y][x] = "o"
+            else:
+                g[y][x] = "y"
+    return rows(g)
+
+
+FIRE_PALETTE = {"y": (255, 236, 120), "o": (255, 160, 40), "r": (232, 72, 30), "R": (150, 30, 20)}
+
+# Small icons shown above an agent's head when it does something (5 x 5)
 ICONS = {
     "drink": ["..b..", ".bbb.", "bbbbb", "bbbbb", ".bbb."],
     "eat": ["...g.", ".rrr.", "rrrrr", "rrrrr", ".rrr."],
@@ -312,209 +511,169 @@ ICON_PALETTE = {"b": (80, 170, 255), "r": (240, 60, 90), "g": (90, 200, 80), "x"
                 "w": (250, 250, 250), "n": (150, 100, 50), "k": (180, 180, 190)}
 
 
-def icon_sprites(tile_px):
-    scale = tile_px // PIXELS
-    out = {}
-    for name, art in ICONS.items():
-        small = pygame.Surface((7, 7), pygame.SRCALPHA)
-        filled = set()
-        for y, row in enumerate(art):
-            for x, ch in enumerate(row):
-                if ch != ".":
-                    filled.add((x + 1, y + 1))
-                    small.set_at((x + 1, y + 1), ICON_PALETTE[ch])
+# ======================================================================
+# turning letter grids into images
+# ======================================================================
+def to_surface(art, palette, outline=False):
+    """Small (16 x 16, or 18 x 18 with outline) surface from a letter grid."""
+    n = len(art)
+    pad = 1 if outline else 0
+    surf = pygame.Surface((n + 2 * pad, n + 2 * pad), pygame.SRCALPHA)
+    filled = set()
+    for y, row in enumerate(art):
+        for x, ch in enumerate(row):
+            if ch != ".":
+                filled.add((x + pad, y + pad))
+                surf.set_at((x + pad, y + pad), palette[ch])
+    if outline:
         for x, y in filled:
             for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
                 if (x + dx, y + dy) not in filled:
-                    small.set_at((x + dx, y + dy), OUTLINE)
-        out[name] = pygame.transform.scale(small, (7 * scale, 7 * scale))
-    return out
+                    surf.set_at((x + dx, y + dy), OUTLINE)
+    return surf
 
 
-CHILD = ["........",
-         "........",
-         "...hh...",
-         "...ss...",
-         "..tttt..",
-         "..stts..",
-         "...tt...",
-         "...pp..."]
+def scaled(surf, tile_px, art_size=PIXELS):
+    """Scale so that art_size art pixels = tile_px screen pixels (hard pixel edges)."""
+    w, h = surf.get_size()
+    return pygame.transform.scale(surf, (round(w * tile_px / art_size), round(h * tile_px / art_size)))
 
-PREGNANT = ["..hhhh..",
-            "..hssh..",
-            "..ssss..",
-            ".tttttt.",
-            "s.tttttt",
-            "..ttttt.",
-            "..p..p..",
-            "..p..p.."]
 
-HEART = ["........",
-         ".rr.rr..",
-         "rrrrrrr.",
-         "rrrrrrr.",
-         ".rrrrr..",
-         "..rrr...",
-         "...r....",
-         "........"]
+def build_sprite(art, palette, tile_px):
+    return scaled(to_surface(art, palette), tile_px)
+
+
+def build_outlined(art, palette, tile_px):
+    """A sprite with a 1-pixel dark outline, so it stands out from the ground.
+    It is one art pixel bigger on every side, so draw it at outline_offset()."""
+    return scaled(to_surface(art, palette, outline=True), tile_px)
+
+
+def outline_offset(tile_px):
+    return round(tile_px / PIXELS)
+
+
+def overlay(base, top):
+    """Lay one letter grid over another ('.' in the top grid lets the base show)."""
+    return ["".join(t if t != "." else b for b, t in zip(br, tr)) for br, tr in zip(base, top)]
+
+
+class SpriteSheet:
+    """Terrain tiles for one zoom level, built when first needed and then cached."""
+
+    def __init__(self, tile_px):
+        self.tile_px = tile_px
+        self.cache = {}
+
+    def get(self, kind, variant, winter, frame):
+        key = (kind, variant, winter, frame)
+        if key not in self.cache:
+            palette = WINTER if winter else SUMMER
+            v = int(variant) % 10
+            if kind == GRASS:
+                art = grass_art(v)
+            elif kind == FOREST:
+                art = overlay(grass_art(v), TREE)
+            elif kind == ROCK:
+                art = rock_art(v % 4)
+            elif kind == CAVE:
+                art = cave_art(v % 2)
+            elif kind == CLIFF:
+                art = cliff_art(v % 3)
+            elif kind == RIVER:
+                art = water_art(frame, "W", "x", "X", 6)
+            elif kind == DEEP_WATER:
+                art = water_art(frame, "O", "o", "O", 4)
+            elif kind == FARMLAND:
+                art = farm_art()
+            else:  # POND
+                art = pond_art(frame % 2)
+            self.cache[key] = build_sprite(art, palette, self.tile_px)
+        return self.cache[key]
+
+    def draw_berries(self, screen, px, py, count, poison=False):
+        s = self.tile_px / PIXELS
+        colour, shine = (POISON_COLOUR, POISON_SHINE) if poison else (BERRY_COLOUR, BERRY_SHINE)
+        size = max(1, round(2 * s))
+        for row, col in BERRY_SPOTS[:count]:
+            x, y = px + round(col * s), py + round(row * s)
+            pygame.draw.rect(screen, colour, (x, y, size, size))
+            if s >= 2:
+                pygame.draw.rect(screen, shine, (x, y, round(s), round(s)))
+
+
+# One colour per terrain type for the minimap
+MINIMAP_KEYS = {GRASS: "G", FOREST: "L", ROCK: "R", RIVER: "W", POND: "P",
+                CAVE: "K", DEEP_WATER: "O", CLIFF: "c", FARMLAND: "f"}
+
+
+def minimap_colour(kind, winter):
+    palette = WINTER if winter else SUMMER
+    return palette[MINIMAP_KEYS[kind]]
+
+
+def people_palette(sex, skin, hair):
+    tunic, shade = CLOTHES[sex]
+    pal = dict(PEOPLE_FIXED)
+    pal.update({"s": SKIN_TONES[skin], "h": HAIR_COLOURS[hair], "t": tunic, "u": shade})
+    return pal
 
 
 def agent_sprites(tile_px):
-    """Returns ({(sex, kind): image}, bones, heart) for one zoom level,
-    where kind is "adult", "child" or "pregnant"."""
+    """Returns ({(sex, kind, skin, hair): image}, bones, heart) for one zoom level.
+    kind is "adult", "child" or "pregnant"."""
     people = {}
-    for sex, pal in AGENT_PALETTES.items():
-        people[(sex, "adult")] = build_outlined(AGENT, pal, tile_px)
-        people[(sex, "child")] = build_outlined(CHILD, pal, tile_px)
-        people[(sex, "pregnant")] = build_outlined(PREGNANT, pal, tile_px)
-    bones = build_sprite(BONES, BONES_PALETTE, tile_px)
-    heart = build_sprite(HEART, {"r": (240, 80, 120)}, tile_px)
+    for sex in (0, 1):
+        adult = MAN if sex == 0 else WOMAN
+        for skin in range(len(SKIN_TONES)):
+            for hair in range(len(HAIR_COLOURS)):
+                pal = people_palette(sex, skin, hair)
+                people[(sex, "adult", skin, hair)] = build_outlined(adult, pal, tile_px)
+                people[(sex, "child", skin, hair)] = build_outlined(CHILD, pal, tile_px)
+                if sex == 1:
+                    people[(sex, "pregnant", skin, hair)] = build_outlined(PREGNANT, pal, tile_px)
+    bones = build_outlined(BONES, {"w": (232, 226, 210), "k": (40, 34, 34)}, tile_px)
+    heart = build_outlined(HEART, {"r": (240, 80, 120), "R": (255, 190, 210)}, tile_px)
     return people, bones, heart
 
 
-# ---------- animals ----------
-RABBIT_ART = ["........",
-              ".....e.e",
-              ".....e.e",
-              "...eeeee",
-              ".weeeeke",
-              "..eeeeee",
-              "...e..e.",
-              "........"]
-
-DEER_ART = [".....b.b",
-            "......b.",
-            ".....ddk",
-            ".dddddd.",
-            "dddddddd",
-            ".llllll.",
-            ".d.d..d.",
-            ".d.d..d."]
-
-WOLF_ART = ["......g.",
-            ".....ggg",
-            "g....gkG",
-            ".ggggggg",
-            ".gggggg.",
-            ".GGGGGG.",
-            ".g.g..g.",
-            ".g.g..g."]
-
-BEAR_ART = [".BB..BB.",
-            ".BBBBBB.",
-            "BBkBBkBB",
-            "BBBBBBBB",
-            ".BBnnBB.",
-            "BBBBBBBB",
-            "BBBBBBBB",
-            "BB.BB.BB"]
-
-ANIMAL_PALETTE = {
-    "e": (176, 150, 120), "w": (245, 245, 240), "k": (20, 18, 18),
-    "d": (170, 110, 60), "b": (226, 206, 160), "l": (232, 210, 176),
-    "g": (150, 150, 158), "G": (98, 98, 108),
-    "B": (88, 58, 36), "n": (150, 110, 80),
-}
-ANIMAL_ART = [RABBIT_ART, DEER_ART, WOLF_ART, BEAR_ART]   # same order as species numbers
-WOLF_EYE = (2, 6)   # (row, column) of the wolf's eye, glows at night
-
-
 def animal_sprites(tile_px):
-    """Returns a list of images, one per species, for one zoom level."""
+    """A list of images, one per species, for one zoom level."""
     return [build_outlined(art, ANIMAL_PALETTE, tile_px) for art in ANIMAL_ART]
-
-
-# ---------- disasters ----------
-ASH = ["aaAaaaaa",
-       "aaaaaAaa",
-       "AaaaaaaE",
-       "aaaEaaaa",
-       "aaaaaaAa",
-       "aAaaaaaa",
-       "aaaaEaaa",
-       "aaaaaaaA"]
-
-FIRE_FRAMES = [["....y...",
-                "...yo...",
-                "..yooy..",
-                "..oroo.y",
-                ".yorrroy",
-                ".orrrrro",
-                "orrRRrro",
-                ".oRRRRo."],
-               ["...y....",
-                "...oy...",
-                "..yooy..",
-                "y.oorr..",
-                "yorrroy.",
-                "orrrrro.",
-                "orrRRrro",
-                ".oRRRRo."]]
-
-FIRE_PALETTE = {"y": (255, 236, 120), "o": (255, 160, 40), "r": (232, 72, 30), "R": (150, 30, 20)}
-ASH_PALETTE = {"a": (64, 60, 58), "A": (92, 86, 80), "E": (200, 90, 40)}
 
 
 def disaster_sprites(tile_px):
     """Ash tile, fire animation frames and a flood overlay for one zoom level."""
-    ash = build_sprite(ASH, ASH_PALETTE, tile_px)
-    fire = [build_sprite(f, FIRE_PALETTE, tile_px) for f in FIRE_FRAMES]
+    ash = build_sprite(ash_art(), SUMMER, tile_px)
+    fire = [build_sprite(fire_art(f), FIRE_PALETTE, tile_px) for f in range(2)]
     flood = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
     flood.fill((60, 120, 200, 150))
+    s = max(1, tile_px // PIXELS)
+    for y in (4, 11):
+        pygame.draw.line(flood, (170, 210, 250, 170), (2 * s, y * s), (7 * s, y * s), s)
     return ash, fire, flood
-
-
-# ---------- farming, piles, weapons ----------
-CROP_STAGES = [
-    ["........",   # young sprouts
-     "........",
-     ".s..s..s",
-     "........",
-     "........",
-     ".s..s..s",
-     "........",
-     "........"],
-    ["........",   # growing
-     ".s..s..s",
-     ".s..s..s",
-     "........",
-     ".s..s..s",
-     ".s..s..s",
-     "........",
-     "........"],
-    [".y..y..y",   # ripe grain
-     ".y..y..y",
-     ".s..s..s",
-     ".y..y..y",
-     ".y..y..y",
-     ".s..s..s",
-     "........",
-     "........"],
-]
-CROP_PALETTE = {"s": (96, 176, 64), "y": (240, 204, 84)}
-
-PILE_ART = ["........",
-            "........",
-            "........",
-            "...bb...",
-            "..bmmb..",
-            ".bmmmmb.",
-            "..bbbb..",
-            "........"]
-PILE_PALETTE = {"b": (120, 84, 50), "m": (196, 146, 96)}
-
-# Weapons drawn in the agent's right hand
-WEAPON_ART = {
-    1: ["........", "........", ".......b", ".......b", ".......b", ".......b", "........", "........"],
-    2: ["........", "........", "........", "........", ".......g", "......gg", "........", "........"],
-    3: [".......g", ".......b", ".......b", ".......b", ".......b", ".......b", ".......b", "........"],
-}
-WEAPON_PALETTE = {"b": (150, 100, 50), "g": (200, 200, 210)}
 
 
 def farm_sprites(tile_px):
     """Crop overlays (young, growing, ripe), a pile image, and weapon overlays."""
-    crops = [build_sprite(art, CROP_PALETTE, tile_px) for art in CROP_STAGES]
-    pile = build_sprite(PILE_ART, PILE_PALETTE, tile_px)
-    weapons = {k: build_outlined(art, WEAPON_PALETTE, tile_px) for k, art in WEAPON_ART.items()}
+    crops = [build_sprite(crop_art(stage), CROP_PALETTE, tile_px) for stage in range(3)]
+    pile = build_outlined(PILE_ART, PILE_PALETTE, tile_px)
+    weapons = {k: build_outlined(weapon_art(k), WEAPON_PALETTE, tile_px) for k in (1, 2, 3)}
     return crops, pile, weapons
+
+
+def shadow_sprite(tile_px):
+    """A soft dark oval drawn under feet."""
+    s = tile_px / PIXELS
+    surf = pygame.Surface((tile_px, tile_px), pygame.SRCALPHA)
+    pygame.draw.ellipse(surf, (0, 0, 0, 80), (round(3 * s), round(13 * s), round(10 * s), round(3 * s)))
+    return surf
+
+
+def icon_sprites(tile_px):
+    scale = max(1, round(tile_px / 12))
+    out = {}
+    for name, art in ICONS.items():
+        small = to_surface(art, ICON_PALETTE, outline=True)
+        out[name] = pygame.transform.scale(small, (7 * scale, 7 * scale))
+    return out
