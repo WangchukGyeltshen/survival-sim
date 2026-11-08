@@ -18,6 +18,9 @@ HOW ONE ROUND OF LEARNING WORKS
 3. LEARN: nudge the brain's weights so better-than-expected actions become a
    bit more likely and worse ones a bit less likely, and so the critic's
    guesses get more accurate. PPO's rule: never change too much at once.
+   Because agents have MEMORY, decisions are studied in short stretches of one
+   agent's life (SEQ_LEN ticks in a row), so the brain can learn what was
+   worth remembering a few ticks earlier.
 4. Save the brain, write a line to the log, and start the next round.
 """
 
@@ -32,7 +35,7 @@ import torch
 
 from src.simulation import Simulation
 from src.observe import observe
-from src.brain import Brain, save_brain
+from src.brain import Brain, MemoryBank, save_brain, load_weights
 from src.rewards import compute_rewards
 from src.agents import NUM_ACTIONS, OLD_AGE, DEATH_CAUSES
 from src.world import TICKS_PER_DAY
@@ -41,6 +44,7 @@ from src.world import TICKS_PER_DAY
 BATCH_SAMPLES = 32_768     # decisions collected before each learning round
 MAX_ROLLOUT_TICKS = 512    # ...or this many ticks, whichever comes first
 MINIBATCH = 4096           # decisions looked at together in one learning step
+SEQ_LEN = 16               # memory is learned over stretches of this many ticks of one life
 EPOCHS = 3                 # how many times each batch is studied
 LEARNING_RATE = 2.5e-4     # size of each nudge to the weights
 GAMMA = 0.995              # how much the future matters (0.995 = about 2 days ahead)
@@ -67,6 +71,7 @@ class Trainer:
         os.makedirs(self.folder, exist_ok=True)
         self.brain = Brain().to(self.device)
         self.optimizer = torch.optim.Adam(self.brain.parameters(), lr=LEARNING_RATE, eps=1e-5)
+        self.parent = None
         self.update = 0
         self.total_ticks = 0
         self.total_samples = 0
@@ -74,14 +79,20 @@ class Trainer:
         latest = os.path.join(self.folder, "latest.pt")
         if args.resume and os.path.exists(latest):
             data = torch.load(latest, map_location=self.device, weights_only=False)
-            self.brain.load_state_dict(data["weights"])
-            self.optimizer.load_state_dict(data["optimizer"])
-            self.update = data["extra"]["update"]
-            self.total_ticks = data["extra"]["total_ticks"]
-            self.total_samples = data["extra"].get("total_samples", 0)
-            self.worlds = data["extra"].get("worlds", 1)
-            print(f"Resumed from round {self.update}")
-        self.sim = new_world()
+            load_weights(self.brain, data, latest)
+            if "optimizer" in data:          # a brain fresh from surgery has none yet
+                self.optimizer.load_state_dict(data["optimizer"])
+            extra = data.get("extra", {})
+            self.update = extra.get("update", 0)
+            self.total_ticks = extra.get("total_ticks", 0)
+            self.total_samples = extra.get("total_samples", 0)
+            self.worlds = extra.get("worlds", 1)
+            self.parent = extra.get("parent")
+            print(f"Resumed from round {self.update}"
+                  + (f" (brain grown from {self.parent})" if self.parent else ""))
+        self.sim = None
+        self.bank = None
+        self.set_world(new_world())
         self.viewer = None
         if not args.no_watch:
             from src.viewer import Viewer, SPEEDS
@@ -152,7 +163,9 @@ class Trainer:
             view, feats = observe(sim, idx)
             view_t = torch.from_numpy(view).to(self.device)
             feats_t = torch.from_numpy(feats).to(self.device)
-            acts, logp, values = brain.act(view_t, feats_t)
+            memory = self.bank.get(a, idx)
+            acts, logp, values, new_memory = brain.act(view_t, feats_t, memory)
+            self.bank.set(idx, new_memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()
 
@@ -165,6 +178,8 @@ class Trainer:
 
             steps.append({
                 "idx": idx,
+                "spawn": a.spawn_tick[idx].astype(np.int64),     # tells apart people who shared a slot
+                "memory": memory.cpu().numpy(),                  # what they remembered before deciding
                 "view": (view * 255).astype(np.uint8),     # stored small to save memory
                 "feats": feats,
                 "actions": actions[idx],
@@ -189,7 +204,8 @@ class Trainer:
         if len(idx):
             view, feats = observe(sim, idx)
             with torch.no_grad():
-                _, v = brain(torch.from_numpy(view).to(self.device), torch.from_numpy(feats).to(self.device))
+                _, v, _ = brain(torch.from_numpy(view).to(self.device), torch.from_numpy(feats).to(self.device),
+                                self.bank.get(sim.agents, idx))
             bootstrap[idx] = v.cpu().numpy()
         self.total_ticks += len(steps)
         self.total_samples += samples
@@ -223,25 +239,35 @@ class Trainer:
         view, feats = cat("view"), cat("feats")
         actions, old_logp = cat("actions"), cat("logp")
         adv, returns = cat("adv"), cat("returns")
+        memory, slot, spawn = cat("memory"), cat("idx"), cat("spawn")
         # Scale advantages to an average of 0 and spread of 1 (makes learning steadier)
         adv = ((adv - adv.mean()) / (adv.std() + 1e-8)).astype(np.float32)
-        n = len(actions)
+        layout = self.stretches(slot, spawn)
+        start_memory = memory[layout[:, 0]]
+        per_minibatch = MINIBATCH // SEQ_LEN
         totals = Counter()
         updates = 0
         for _ in range(EPOCHS):
-            order = np.random.permutation(n)
-            for start in range(0, n, MINIBATCH):
-                mb = order[start:start + MINIBATCH]
-                if len(mb) < MINIBATCH // 4:
+            order = np.random.permutation(len(layout))
+            for start in range(0, len(layout), per_minibatch):
+                chosen = order[start:start + per_minibatch]
+                if len(chosen) < per_minibatch // 4:
                     continue   # skip a tiny leftover group
+                lay = layout[chosen]
+                filled = lay >= 0
+                mb = lay[filled]                                  # the decisions in this group
+                local = np.full(lay.shape, -1, dtype=np.int64)
+                local[filled] = np.arange(len(mb))
                 v_t = torch.from_numpy(view[mb]).to(self.device).float() / 255
                 f_t = torch.from_numpy(feats[mb]).to(self.device)
                 a_t = torch.from_numpy(actions[mb]).to(self.device)
                 old_t = torch.from_numpy(old_logp[mb]).to(self.device)
                 adv_t = torch.from_numpy(adv[mb]).to(self.device)
                 ret_t = torch.from_numpy(returns[mb]).to(self.device)
+                m_t = torch.from_numpy(start_memory[chosen]).to(self.device)
+                lay_t = torch.from_numpy(local).to(self.device)
 
-                new_logp, entropy, value = self.brain.evaluate(v_t, f_t, a_t)
+                new_logp, entropy, value = self.brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t)
                 # How much more (or less) likely is this action now than when it was taken?
                 ratio = torch.exp(new_logp - old_t)
                 # PPO: follow the advantage, but don't let the ratio move past 1 +/- CLIP
@@ -264,11 +290,31 @@ class Trainer:
                 self.draw()   # keep the window responsive while learning
         return {k: v / max(updates, 1) for k, v in totals.items()}
 
+    @staticmethod
+    def stretches(slot, spawn):
+        """Cut every agent's life (in this batch) into stretches of SEQ_LEN ticks.
+        Returns a table (stretches x SEQ_LEN) of decision rows, -1 = padding.
+        Decisions are stored tick by tick, so sorting by person (slot + spawn
+        tick) while keeping the original order puts each life in time order."""
+        n = len(slot)
+        life = slot.astype(np.int64) * (1 << 32) + spawn
+        order = np.argsort(life, kind="stable")
+        sorted_life = life[order]
+        new_life = np.r_[True, sorted_life[1:] != sorted_life[:-1]]
+        life_start = np.flatnonzero(new_life)
+        pos = np.arange(n) - life_start[np.cumsum(new_life) - 1]     # tick number within the life
+        new_stretch = new_life | (pos % SEQ_LEN == 0)
+        stretch = np.cumsum(new_stretch) - 1
+        layout = np.full((stretch[-1] + 1, SEQ_LEN), -1, dtype=np.int64)
+        layout[stretch, pos % SEQ_LEN] = order
+        return layout
+
     # ---------------- 4. SAVE and LOG ----------------
     def save(self):
         extra = {"update": self.update, "total_ticks": self.total_ticks,
-                 "total_samples": self.total_samples, "worlds": self.worlds}
-        data = {"weights": self.brain.state_dict(), "optimizer": self.optimizer.state_dict(), "extra": extra}
+                 "total_samples": self.total_samples, "worlds": self.worlds, "parent": self.parent}
+        data = {"weights": self.brain.state_dict(), "sizes": self.brain.sizes,
+                "optimizer": self.optimizer.state_dict(), "extra": extra}
         torch.save(data, os.path.join(self.folder, "latest.pt"))
         if self.update % SNAPSHOT_EVERY == 0:
             save_brain(self.brain, os.path.join(self.folder, f"brain_round{self.update:05d}.pt"), extra)
@@ -327,11 +373,16 @@ class Trainer:
         return (self.sim.agents.population < MIN_POPULATION
                 or self.sim.world.day >= MAX_WORLD_DAYS)
 
+    def set_world(self, sim):
+        """Use a new world. Everyone in it starts with an empty memory."""
+        self.sim = sim
+        self.bank = MemoryBank(self.brain, sim.agents.count, self.device)
+        if getattr(self, "viewer", None):
+            self.viewer.set_sim(sim)
+
     def next_world(self):
-        self.sim = new_world()
+        self.set_world(new_world())
         self.worlds += 1
-        if self.viewer:
-            self.viewer.set_sim(self.sim)
 
 
 if __name__ == "__main__":

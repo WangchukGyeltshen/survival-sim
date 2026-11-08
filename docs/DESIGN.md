@@ -158,7 +158,10 @@ Wolves and bears can be hunted, but it is very hard; groups and better weapons h
 1. **Shared learning (culture):** agents learn with PPO (an actor-critic method); every agent's experience trains the brain.
 2. **Evolution (genes):** inherited genes shape bodies (and, from Stage 3, behaviour).
 
-Planned for Stage 3: memory (a GRU layer), behaviour genes, and **one brain per tribe**, so each tribe can develop its own culture.
+3. **Memory (Stage 3):** a GRU layer keeps 128 numbers per agent from one tick to the next, so an agent can remember what it can no longer see. A newborn starts with an empty memory. While learning, decisions are replayed in 16-tick stretches of one agent's life, so the brain learns what was worth remembering.
+4. **Brain surgery (Stage 3):** when the world gains senses or actions, `surgery.py` grows the old brain into the new shape. Old weights are copied; new senses start ignored (zero weights); new actions start with a small share of the chances (10% in total); the memory starts ignored. A check confirms the grown brain chooses exactly like the old one. run2 starts from run1 this way.
+
+Still planned for Stage 3: behaviour genes, and **one brain per tribe**, so each tribe can develop its own culture.
 
 ## Measurements
 - Training: survival, reward, curiosity, births, causes of death (`analyze.py runs/<name>`)
@@ -169,8 +172,8 @@ Planned for Stage 3: memory (a GRU layer), behaviour genes, and **one brain per 
 2. Hunting, farming, crafting, weapons, fighting, breeding, genes (done)
 3. Learning: senses, rewards, brain, PPO trainer (done)
 4. Stage 1 tools: history runs, replays, charts, family trees, heatmaps (done)
-5. **Stage 2: the bigger world:** resources and metal ages, fire, building, disease, migration, sharing, calls, tribes, parenting (in progress)
-6. Stage 3: the bigger brain: memory, behaviour genes, tribe brains, brain surgery from run1
+5. Stage 2: the bigger world: resources and metal ages, fire, building, disease, migration, sharing, calls, tribes, parenting (done)
+6. **Stage 3: the bigger brain:** memory and brain surgery from run1 (done); behaviour genes, tribe brains (in progress)
 7. Stage 4: faster training (several worlds at once) and comparison experiments
 8. Keep adding realism while training continues
 9. Final experiment: big world with continents

@@ -1,7 +1,7 @@
 """Open a window and watch the simulation.
 
     python play.py                                 agents act randomly
-    python play.py --brain runs/run1/latest.pt     agents use a trained brain
+    python play.py --brain runs/run2/latest.pt     agents use a trained brain
 """
 
 import argparse

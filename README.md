@@ -19,12 +19,16 @@ The first install line gets the GPU version of PyTorch (the normal one is CPU on
 | What | Command |
 |---|---|
 | Watch random agents | `python play.py` |
-| Watch a trained brain | `python play.py --brain runs/run1/latest.pt` |
-| Train (with live window) | `python train.py` (continue later with `--resume`) |
-| History run (one recorded world) | `python experiment.py --brain runs/run1/latest.pt --name exp1` |
+| Watch a trained brain | `python play.py --brain runs/run2/latest.pt` |
+| Train (with live window) | `python train.py --name run2` (continue later with `--resume`) |
+| Grow an old brain to fit the current world (brain surgery) | `python surgery.py runs/run1/latest.pt --name run2` |
+| History run (one recorded world) | `python experiment.py --brain runs/run2/latest.pt --name exp1` |
 | Control run (untrained brain) | `python experiment.py --blank --name control1` |
 | Rewatch a history run | `python replay.py experiments/exp1` |
-| Charts for training | `python analyze.py runs/run1` |
+| Charts for training | `python analyze.py runs/run2` |
 | Charts, family tree, heatmap for a history run | `python analyze.py experiments/exp1` |
 
 Charts are saved to `<folder>/charts/`; open `report.html` there in a browser.
+
+## Upgrading a brain
+Whenever the world gains new senses or actions, older brains no longer fit. `surgery.py` grows an old brain into the new shape without losing what it learned, then checks that it still chooses exactly like the old one. run1 (before Stage 2) was grown into run2 this way.

@@ -5,8 +5,8 @@ and lets their story play out: generations are born, live and die, and
 everything is written down so it can be studied (analyze.py) and rewatched
 (replay.py).
 
-    python experiment.py --brain runs/run1/latest.pt              agents keep learning as they live
-    python experiment.py --brain runs/run1/latest.pt --frozen     brain never changes (instincts only)
+    python experiment.py --brain runs/run2/latest.pt              agents keep learning as they live
+    python experiment.py --brain runs/run2/latest.pt --frozen     brain never changes (instincts only)
     python experiment.py --blank                                  control: a brand-new, untrained brain
     python experiment.py ... --name exp1 --seed 7 --days 400 --no-watch
 
@@ -26,6 +26,7 @@ from src.simulation import Simulation
 from src.observe import observe
 from src.recorder import Recorder
 from src.agents import NUM_ACTIONS
+from src.brain import load_weights
 
 
 class HistoryRun(train.Trainer):
@@ -39,17 +40,16 @@ class HistoryRun(train.Trainer):
         self.folder_out = os.path.join("experiments", args.name)
         if args.brain and not args.blank:
             data = torch.load(args.brain, map_location=self.device, weights_only=False)
-            self.brain.load_state_dict(data["weights"])
+            load_weights(self.brain, data, args.brain)
             print(f"Loaded brain: {args.brain}")
         elif not args.blank:
-            raise SystemExit("Give a brain with --brain runs/run1/latest.pt, or use --blank for an untrained one")
+            raise SystemExit("Give a brain with --brain runs/run2/latest.pt, or use --blank for an untrained one")
         else:
             print("Using a blank (untrained) brain: this is the control experiment")
 
         # One fixed world for the whole history
-        self.sim = Simulation(size=128, agents=200, seed=args.seed)
+        self.set_world(Simulation(size=128, agents=200, seed=args.seed))
         if self.viewer:
-            self.viewer.set_sim(self.sim)
             self.viewer.training = True
         info = {"name": args.name, "seed": args.seed, "brain": None if args.blank else args.brain,
                 "learning": not args.frozen, "started": time.strftime("%Y-%m-%d %H:%M")}
@@ -87,8 +87,10 @@ class HistoryRun(train.Trainer):
             a = sim.agents
             idx = np.flatnonzero(a.alive)
             view, feats = observe(sim, idx)
-            acts, _, _ = self.brain.act(torch.from_numpy(view).to(self.device),
-                                        torch.from_numpy(feats).to(self.device))
+            memory = self.bank.get(a, idx)
+            acts, _, _, memory = self.brain.act(torch.from_numpy(view).to(self.device),
+                                                torch.from_numpy(feats).to(self.device), memory)
+            self.bank.set(idx, memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()
             alive_before = a.alive.copy()
@@ -135,7 +137,7 @@ class HistoryRun(train.Trainer):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run one recorded history")
-    parser.add_argument("--brain", help="brain to use, e.g. runs/run1/latest.pt")
+    parser.add_argument("--brain", help="brain to use, e.g. runs/run2/latest.pt")
     parser.add_argument("--blank", action="store_true", help="use an untrained brain (control)")
     parser.add_argument("--frozen", action="store_true", help="don't learn during the run")
     parser.add_argument("--name", default="exp1", help="results go to experiments/<name>/")
