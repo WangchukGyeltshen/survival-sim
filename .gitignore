@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 runs/
 checkpoints/
+# history runs: keep the charts and tables, skip the big replay and brain files
+experiments/*/replay/
+experiments/*/brain/

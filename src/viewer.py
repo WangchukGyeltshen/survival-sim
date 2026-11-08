@@ -15,6 +15,7 @@ Controls:
     F                      camera follows the selected agent
     V                      show what the selected agent sees
     I                      show / hide action icons
+    G                      heatmap: where agents have spent their time
     + / -                  speed up / slow down
     SPACE                  pause / resume
     M                      show / hide minimap
@@ -40,6 +41,7 @@ from src.agents import (ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE, EAT, 
 from src.observe import observe, CH, VIEW_SIZE, TERRAIN_ORDER
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
+from src.names import identity_rng, make_name
 
 # Window layout (the real sizes are worked out from the screen in setup_window)
 HUD_HEIGHT = 40
@@ -92,6 +94,7 @@ HELP_LINES = [
     "F               follow selected",
     "V               agent's eyes",
     "I               action icons",
+    "G               heatmap",
     "+ / -           speed",
     "SPACE           pause",
     "M               minimap",
@@ -132,10 +135,6 @@ DEATH_WORDS = {
     "lightning": "was struck by lightning", "old age": "died of old age",
     "deer": "was kicked to death by a deer", "childbirth": "died in childbirth",
 }
-SYLLABLES_A = ["ka", "mi", "ta", "lo", "ri", "sa", "no", "pe", "da", "yu", "ke", "bo", "ni", "ra",
-               "zu", "ve", "ha", "jo", "li", "ma", "to", "se", "wa", "go"]
-SYLLABLES_B = ["ra", "n", "vo", "la", "mi", "ko", "ta", "ri", "sh", "do", "na", "ki", "lu", "m",
-               "re", "ya", "s", "to", "ba", "l"]
 
 
 def night_darkness(tick):
@@ -195,6 +194,8 @@ class Viewer:
         self.turbo = False         # T: stop drawing so training runs at full speed
         self.training_info = []    # lines of text shown in the training panel
         self.new_world_maker = lambda: Simulation(size=self.world.size)
+        self.key_handlers = {}     # extra keys, e.g. for replays: {pygame key: function}
+        self.show_heat = False
         self.flash = 0           # frames of lightning flash left
         self.rain = np.random.default_rng(1).random((260, 2))   # raindrop positions
         self.zoom = START_ZOOM
@@ -226,6 +227,7 @@ class Viewer:
         self.following = False
         self.hit_marks = []      # a new world starts with a clean slate
         self.heart_marks = []
+        self.heat = np.zeros((world.size, world.size), dtype=np.float32)
         # Pick a random look for each tile once, so the map doesn't flicker
         self.variants = np.random.default_rng(0).integers(0, 10, (world.size, world.size))
         self.minimap = None
@@ -249,9 +251,8 @@ class Viewer:
         known = self.looks.get(i)
         if known and known[0] == spawn:
             return known[1:]
-        rnd = random.Random(i * 7919 + spawn * 104729)
-        name = (rnd.choice(SYLLABLES_A) + rnd.choice(SYLLABLES_B) +
-                (rnd.choice(SYLLABLES_A) if rnd.random() < 0.4 else "")).capitalize()
+        rnd = identity_rng(i, spawn)
+        name = make_name(rnd)
         skin, hair = rnd.randrange(len(SKIN_TONES)), rnd.randrange(len(HAIR_COLOURS))
         mother, father = int(a.mother[i]), int(a.father[i])
         if mother >= 0 and mother in self.looks:
@@ -349,6 +350,8 @@ class Viewer:
             sheet.draw_berries(self.screen, px, py, count, poison)
         self.screen.blits(overlays, doreturn=False)
         self.screen.blits(piles, doreturn=False)
+        if self.show_heat:
+            self.draw_heat(first_x, first_y, last_x, last_y)
         self.draw_agents(first_x, first_y, last_x, last_y)
 
         # Night: dark blue see-through layer over the map
@@ -363,6 +366,21 @@ class Viewer:
         self.screen.blits(fires, doreturn=False)
         self.draw_weather()
         self.screen.set_clip(None)
+
+    def draw_heat(self, first_x, first_y, last_x, last_y):
+        """Colour each tile by how much time agents have spent on it (G key)."""
+        heat = self.heat[first_y:last_y, first_x:last_x]
+        if heat.max() <= 0:
+            return
+        level = np.log1p(heat) / np.log1p(self.heat.max())
+        tile = self.tile
+        layer = pygame.Surface((tile, tile), pygame.SRCALPHA)
+        for (dy, dx) in np.argwhere(level > 0):
+            v = float(level[dy, dx])
+            # dark purple (a little time) -> orange -> yellow (a lot of time)
+            colour = (int(80 + 175 * v), int(20 + 200 * v ** 2), int(120 * (1 - v)), int(70 + 120 * v))
+            layer.fill(colour)
+            self.screen.blit(layer, self.to_screen(first_x + dx, first_y + dy))
 
     def draw_weather(self):
         w = self.world
@@ -499,7 +517,7 @@ class Viewer:
         if i is None:
             return
         a = self.sim.agents
-        height = 292 if a.alive[i] else 64
+        height = 314 if a.alive[i] else 64
         box = pygame.Rect(12, HUD_HEIGHT + MAP_H - height - 12, 480, height)
         self.panel(box)
 
@@ -549,11 +567,15 @@ class Viewer:
         if mother >= 0 and int(a.spawn_tick[i]) >= int(a.spawn_tick[mother]):
             family = f"mother: {self.name(mother)}   " + family
         lines.append(family)
+        kids = np.flatnonzero(a.alive & ((a.mother == i) | (a.father == i)) & (a.spawn_tick >= a.spawn_tick[i]))
+        if len(kids):
+            names = ", ".join(self.name(k) for k in kids[:4]) + ("..." if len(kids) > 4 else "")
+            lines.append(f"living children: {names}")
         for k, line in enumerate(lines):
             self.screen.blit(self.small_font.render(line, False, HUD_TEXT), (box.x + 12, y + 4 + k * 21))
         short = {"strength": "str", "hardiness": "hardy", "endurance": "endur", "vision": "vision"}
         genes = "genes: " + "  ".join(f"{short[g]} {a.genes[g][i]:.2f}" for g in GENE_NAMES)
-        self.screen.blit(self.small_font.render(genes, False, (180, 200, 240)), (box.x + 12, y + 4 + 4 * 21))
+        self.screen.blit(self.small_font.render(genes, False, (180, 200, 240)), (box.x + 12, y + 4 + len(lines) * 21))
 
     def build_minimap(self):
         w = self.world
@@ -914,8 +936,12 @@ class Viewer:
                     self.show_eyes = not self.show_eyes
                 if event.key == pygame.K_i:
                     self.show_icons = not self.show_icons
+                if event.key == pygame.K_g:
+                    self.show_heat = not self.show_heat
                 if event.key == pygame.K_f and self.selected is not None:
                     self.following = not self.following
+                if event.key in self.key_handlers:
+                    self.key_handlers[event.key]()
 
             if event.type == pygame.MOUSEWHEEL:
                 mx, my = pygame.mouse.get_pos()
@@ -986,6 +1012,8 @@ class Viewer:
         # pile up while the screen isn't being drawn (turbo mode)
         self.hit_marks = [m for m in self.hit_marks if 0 <= tick - m[2] < HIT_TICKS]
         self.heart_marks = [m for m in self.heart_marks if 0 <= tick - m[2] < HEART_TICKS]
+        alive = self.sim.agents.alive
+        np.add.at(self.heat, (self.sim.agents.y[alive], self.sim.agents.x[alive]), 1)
         self.hit_marks += [(x, y, tick) for x, y in self.sim.agents.hits]
         self.heart_marks += [(x, y, tick) for x, y in self.sim.agents.hearts]
         self.collect_log()

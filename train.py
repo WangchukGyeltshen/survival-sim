@@ -93,6 +93,7 @@ class Trainer:
         self.stop = False
         self.log_path = os.path.join(self.folder, "log.csv")
         self.recent_life = []        # days survived by agents who died recently
+        self.tick_hooks = []         # functions(actions, acted) called after every tick
         print(f"Training on: {self.device}  |  saving to: {self.folder}")
 
     # ---------------- the window ----------------
@@ -157,6 +158,8 @@ class Trainer:
 
             alive_before = a.alive.copy()
             sim.step(actions)
+            for hook in self.tick_hooks:
+                hook(actions, alive_before)
             died = alive_before & ~a.alive
             rewards, done = compute_rewards(a, alive_before, died)
 
@@ -313,13 +316,16 @@ class Trainer:
                 self.log(stats, learn_stats, time.time() - start)
                 if self.viewer:
                     self.viewer.training_info = self.info_lines(stats)
-                if (self.sim.agents.population < MIN_POPULATION
-                        or self.sim.world.day >= MAX_WORLD_DAYS):
+                if self.should_reset():
                     self.next_world()
         except KeyboardInterrupt:
             pass
         self.save()
         print(f"Stopped. Brain saved to {self.folder}/latest.pt")
+
+    def should_reset(self):
+        return (self.sim.agents.population < MIN_POPULATION
+                or self.sim.world.day >= MAX_WORLD_DAYS)
 
     def next_world(self):
         self.sim = new_world()
