@@ -38,7 +38,7 @@ from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites, ani
                          deposit_sprites, TRIBE_COLOURS, TRIBE_NAMES)
 from src.world import CAMPFIRE, STRUCTURE_NAMES, BLOCKS_PEOPLE, ROCK
 from src.tech import BLUEPRINTS, TOOL_NAMES
-from src.agents import (ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE, EAT, DRINK,
+from src.agents import (ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, BEHAVIOUR_GENES, ADULT_AGE, EAT, DRINK,
                         PICK_UP, PLANT, CRAFT, ATTACK_ANIMAL, ATTACK_PERSON, MATE,
                         ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE, ALL_ITEMS,
                         GIVE, BUILD, CALL_1, CALL_2, CALL_3)
@@ -49,6 +49,7 @@ from src.names import identity_rng, make_name
 
 # Window layout (the real sizes are worked out from the screen in setup_window)
 HUD_HEIGHT = 40
+TEMPER_SHORT = {"aggression": "aggr", "generosity": "give", "drive": "drive", "industry": "work", "curiosity": "curio"}
 SIDEBAR_W = 430
 MAP_W, MAP_H = 1450, 940
 
@@ -554,8 +555,8 @@ class Viewer:
         if i is None:
             return
         a = self.sim.agents
-        height = 356 if a.alive[i] else 64
-        box = pygame.Rect(12, HUD_HEIGHT + MAP_H - height - 12, 560, height)
+        height = 377 if a.alive[i] else 64
+        box = pygame.Rect(12, HUD_HEIGHT + MAP_H - height - 12, 580, height)
         self.panel(box)
 
         sex = "male" if a.sex[i] == MALE else "female"
@@ -620,6 +621,9 @@ class Viewer:
         short = {"strength": "str", "hardiness": "hardy", "endurance": "endur", "vision": "vision"}
         genes = "genes: " + "  ".join(f"{short[g]} {a.genes[g][i]:.2f}" for g in GENE_NAMES)
         self.screen.blit(self.small_font.render(genes, False, (180, 200, 240)), (box.x + 12, y + 4 + len(lines) * 21))
+        temper = "temper: " + "  ".join(f"{TEMPER_SHORT[g]} {round(a.genes[g][i], 1) + 0.0:+.1f}" for g in BEHAVIOUR_GENES)
+        self.screen.blit(self.small_font.render(temper, False, (240, 200, 170)),
+                         (box.x + 12, y + 4 + (len(lines) + 1) * 21))
 
     def build_minimap(self):
         w = self.world

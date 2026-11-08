@@ -21,7 +21,7 @@ from src.world import (GRASS, FOREST, ROCK, RIVER, POND, CAVE, DEEP_WATER, CLIFF
                        STORAGE, BRIDGE, WELL, WATCHTOWER, FURNACE)
 from src.agents import (ADULT_AGE, TICKS_PER_YEAR, ITEMS, NEW_ITEMS, CARRY_LIMIT, NUM_ACTIONS,
                         MALE, FEMALE, HANDS, GENE_NAMES, GENE_LIMITS, PREGNANCY_TICKS,
-                        MAX_STAT, NUM_TRIBES, POT_SIPS)
+                        MAX_STAT, NUM_TRIBES, POT_SIPS, BEHAVIOUR_GENES)
 from src.tech import (FLINT_BLADE, COPPER_SPEAR, BRONZE_SPEAR, IRON_SPEAR, BLUEPRINTS, NUM_CALLS)
 from src.animals import RABBIT, DEER, WOLF, BEAR
 
@@ -75,6 +75,8 @@ SELF_FEATURES = (
     + [f"heard call {k + 1}" for k in range(NUM_CALLS)]
     + [f"tribe {t}" for t in range(NUM_TRIBES)]
     + ["on watchtower", "in hut"]
+    # ---- added in Stage 3 ----
+    + [f"gene {g}" for g in BEHAVIOUR_GENES]
 )
 NUM_SELF = len(SELF_FEATURES)
 SEASONS = ["spring", "summer", "autumn", "winter"]
@@ -249,6 +251,8 @@ def self_features(sim, idx):
     put(np.eye(NUM_TRIBES, dtype=np.float32)[a.tribe[idx]])
     put(on_tower_now(sim, idx))
     put(w.structure[a.y[idx], a.x[idx]] == HUT)
+    for g in BEHAVIOUR_GENES:                         # -1..1 scaled to 0..1
+        put((a.genes[g][idx] + 1) / 2)
     assert col == NUM_SELF
     return f
 

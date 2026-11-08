@@ -19,7 +19,7 @@ matplotlib.use("Agg")            # draw to files, no window
 import matplotlib.pyplot as plt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from src.agents import DEATH_CAUSES, ACTION_NAMES, GENE_NAMES   # noqa: E402
+from src.agents import DEATH_CAUSES, ACTION_NAMES, GENE_NAMES, BEHAVIOUR_GENES   # noqa: E402
 from src.sprites import minimap_colour                           # noqa: E402
 
 plt.rcParams.update({"figure.facecolor": "white", "axes.grid": True, "grid.alpha": 0.3,
@@ -220,6 +220,15 @@ def history_charts(folder, out):
         ax.set(title=f"average {g}", xlabel="day")
     fig.suptitle("Evolution: how the average genes change over generations")
     save(fig, out, "genes.png", charts)
+
+    if f"gene_{BEHAVIOUR_GENES[0]}" in d:
+        fig, axes = plt.subplots(1, len(BEHAVIOUR_GENES), figsize=(16, 3.6))
+        for ax, g in zip(axes, BEHAVIOUR_GENES):
+            ax.plot(days, d[f"gene_{g}"], color="#d6825b", lw=2)
+            ax.axhline(0, color="#999999", lw=1, ls="--")
+            ax.set(title=f"average {g}", xlabel="day", ylim=(-1, 1))
+        fig.suptitle("Evolution of temperament: average behaviour genes (0 = where the founders started)")
+        save(fig, out, "behaviour_genes.png", charts)
 
     fig, ax = plt.subplots(figsize=(10, 4.5))
     for key, colour in (("rabbits", "#b09070"), ("deer", "#c07a3c"), ("wolves", "#6b6b78"), ("bears", "#5a3a20")):

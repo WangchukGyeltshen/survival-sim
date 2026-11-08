@@ -5,6 +5,7 @@ import torch
 
 from src.observe import observe
 from src.brain import MemoryBank
+from src.temperament import temperament
 
 
 def to_tensors(view, self_feats, device):
@@ -28,7 +29,8 @@ class BrainPolicy:
         if len(idx):
             view, feats = observe(sim, idx)
             memory = self.bank.get(sim.agents, idx)
-            acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory)
+            temper = torch.from_numpy(temperament(sim.agents, idx)).to(self.device)
+            acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory, temper)
             self.bank.set(idx, memory)
             actions[idx] = acts.cpu().numpy()
         return actions

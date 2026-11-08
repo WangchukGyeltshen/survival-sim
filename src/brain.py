@@ -18,7 +18,8 @@ MEMORY (added in Stage 3): a GRU, a small layer that keeps 128 numbers from one
       what to write, so an agent can remember things it can no longer see
       ("there was water behind that hill", "a wolf chased me from the east").
       Each agent has its own memory; a newborn starts with an empty one.
-ACTOR: a score for each action, turned into chances (softmax).
+ACTOR: a score for each action. Each agent's behaviour genes then nudge the
+      scores (src/temperament.py), and they are turned into chances (softmax).
 CRITIC: one number, its guess of how much future reward to expect.
 """
 
@@ -29,6 +30,7 @@ from torch.distributions import Categorical
 
 from src.observe import NUM_CHANNELS, NUM_SELF, VIEW_SIZE
 from src.agents import NUM_ACTIONS
+from src.temperament import shape_scores
 
 MEMORY = 128     # how many numbers each agent remembers between ticks
 
@@ -94,16 +96,17 @@ class Brain(nn.Module):
         return logits, value, memory
 
     @torch.no_grad()
-    def act(self, view, self_features, memory=None, greedy=False):
+    def act(self, view, self_features, memory=None, temper=None, greedy=False):
         """Pick an action for each agent. Returns (actions, log_probs, values, new memory).
+        temper: each agent's behaviour genes (None = no nudging).
         greedy=True always picks the most likely action (used only for testing)."""
         logits, values, memory = self(view, self_features, memory)
-        dist = Categorical(logits=logits)
+        dist = Categorical(logits=shape_scores(logits, temper))
         actions = logits.argmax(dim=1) if greedy else dist.sample()
         return actions, dist.log_prob(actions), values, memory
 
     # ----- learning: replay short stretches of an agent's life -----
-    def evaluate_sequences(self, view, self_features, actions, start_memory, layout):
+    def evaluate_sequences(self, view, self_features, actions, start_memory, layout, temper=None):
         """Used while learning. The decisions come in short stretches of one
         agent's life (layout: stretches x SEQ_LEN, each entry the row of a
         decision, or -1 for padding). The memory is replayed through each
@@ -130,7 +133,7 @@ class Brain(nn.Module):
             r = rows[here, t]
             out_logits[r] = logits[here]
             out_values[r] = value[here]
-        dist = Categorical(logits=out_logits)
+        dist = Categorical(logits=shape_scores(out_logits, temper))
         return dist.log_prob(actions), dist.entropy(), out_values
 
 

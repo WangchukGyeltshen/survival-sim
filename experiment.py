@@ -27,6 +27,7 @@ from src.observe import observe
 from src.recorder import Recorder
 from src.agents import NUM_ACTIONS
 from src.brain import load_weights
+from src.temperament import temperament
 
 
 class HistoryRun(train.Trainer):
@@ -88,8 +89,9 @@ class HistoryRun(train.Trainer):
             idx = np.flatnonzero(a.alive)
             view, feats = observe(sim, idx)
             memory = self.bank.get(a, idx)
+            temper = torch.from_numpy(temperament(a, idx)).to(self.device)
             acts, _, _, memory = self.brain.act(torch.from_numpy(view).to(self.device),
-                                                torch.from_numpy(feats).to(self.device), memory)
+                                                torch.from_numpy(feats).to(self.device), memory, temper)
             self.bank.set(idx, memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()

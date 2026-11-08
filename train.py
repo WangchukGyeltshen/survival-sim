@@ -37,6 +37,7 @@ from src.simulation import Simulation
 from src.observe import observe
 from src.brain import Brain, MemoryBank, save_brain, load_weights
 from src.rewards import compute_rewards
+from src.temperament import temperament
 from src.agents import NUM_ACTIONS, OLD_AGE, DEATH_CAUSES
 from src.world import TICKS_PER_DAY
 
@@ -72,6 +73,7 @@ class Trainer:
         self.brain = Brain().to(self.device)
         self.optimizer = torch.optim.Adam(self.brain.parameters(), lr=LEARNING_RATE, eps=1e-5)
         self.parent = None
+        self.surgeries = []
         self.update = 0
         self.total_ticks = 0
         self.total_samples = 0
@@ -88,6 +90,7 @@ class Trainer:
             self.total_samples = extra.get("total_samples", 0)
             self.worlds = extra.get("worlds", 1)
             self.parent = extra.get("parent")
+            self.surgeries = extra.get("surgeries", [])
             print(f"Resumed from round {self.update}"
                   + (f" (brain grown from {self.parent})" if self.parent else ""))
         self.sim = None
@@ -164,7 +167,9 @@ class Trainer:
             view_t = torch.from_numpy(view).to(self.device)
             feats_t = torch.from_numpy(feats).to(self.device)
             memory = self.bank.get(a, idx)
-            acts, logp, values, new_memory = brain.act(view_t, feats_t, memory)
+            temper = temperament(a, idx)                         # inborn leanings (behaviour genes)
+            acts, logp, values, new_memory = brain.act(view_t, feats_t, memory,
+                                                       torch.from_numpy(temper).to(self.device))
             self.bank.set(idx, new_memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()
@@ -180,6 +185,7 @@ class Trainer:
                 "idx": idx,
                 "spawn": a.spawn_tick[idx].astype(np.int64),     # tells apart people who shared a slot
                 "memory": memory.cpu().numpy(),                  # what they remembered before deciding
+                "temper": temper,
                 "view": (view * 255).astype(np.uint8),     # stored small to save memory
                 "feats": feats,
                 "actions": actions[idx],
@@ -239,7 +245,7 @@ class Trainer:
         view, feats = cat("view"), cat("feats")
         actions, old_logp = cat("actions"), cat("logp")
         adv, returns = cat("adv"), cat("returns")
-        memory, slot, spawn = cat("memory"), cat("idx"), cat("spawn")
+        memory, slot, spawn, temper = cat("memory"), cat("idx"), cat("spawn"), cat("temper")
         # Scale advantages to an average of 0 and spread of 1 (makes learning steadier)
         adv = ((adv - adv.mean()) / (adv.std() + 1e-8)).astype(np.float32)
         layout = self.stretches(slot, spawn)
@@ -266,8 +272,9 @@ class Trainer:
                 ret_t = torch.from_numpy(returns[mb]).to(self.device)
                 m_t = torch.from_numpy(start_memory[chosen]).to(self.device)
                 lay_t = torch.from_numpy(local).to(self.device)
+                t_t = torch.from_numpy(temper[mb]).to(self.device)
 
-                new_logp, entropy, value = self.brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t)
+                new_logp, entropy, value = self.brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t, t_t)
                 # How much more (or less) likely is this action now than when it was taken?
                 ratio = torch.exp(new_logp - old_t)
                 # PPO: follow the advantage, but don't let the ratio move past 1 +/- CLIP
@@ -312,7 +319,8 @@ class Trainer:
     # ---------------- 4. SAVE and LOG ----------------
     def save(self):
         extra = {"update": self.update, "total_ticks": self.total_ticks,
-                 "total_samples": self.total_samples, "worlds": self.worlds, "parent": self.parent}
+                 "total_samples": self.total_samples, "worlds": self.worlds, "parent": self.parent,
+                 "surgeries": self.surgeries}
         data = {"weights": self.brain.state_dict(), "sizes": self.brain.sizes,
                 "optimizer": self.optimizer.state_dict(), "extra": extra}
         torch.save(data, os.path.join(self.folder, "latest.pt"))

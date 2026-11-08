@@ -1,7 +1,12 @@
 """Brain surgery: grow an old brain into the current one without losing what it learned.
 
-    python surgery.py runs/run1/latest.pt --name run2
-    python train.py --name run2 --resume          then keep training the grown brain
+    python surgery.py runs/run1/latest.pt --name run2     grow run1 into a new run, run2
+    python surgery.py runs/run2/latest.pt --name run2     upgrade run2 itself (keeps its round count)
+    python train.py --name run2 --resume                  then keep training the grown brain
+
+Upgrading a run in place is the normal step of the long-term plan: the world
+gets more realistic, the same run's brain grows to fit, and training goes on.
+The brain from before surgery is kept as runs/<name>/before_surgery_round<N>.pt.
 
 When the world gets new senses or actions (always added at the END of the
 lists), the old brain no longer fits. Surgery builds a new, bigger brain and:
@@ -128,7 +133,8 @@ def main():
 
     out_folder = os.path.join("runs", args.name)
     out_path = os.path.join(out_folder, "latest.pt")
-    if os.path.exists(out_path) and not args.force:
+    in_place = os.path.abspath(out_path) == os.path.abspath(args.old)
+    if os.path.exists(out_path) and not args.force and not in_place:
         raise SystemExit(f"{out_path} already exists (use --force to overwrite, or pick another --name)")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -146,7 +152,10 @@ def main():
     if sizes["memory"] and new.sizes["memory"] != sizes["memory"]:
         raise SystemExit("The memory changed size; surgery can't handle that yet")
 
-    rounds = data.get("extra", {}).get("update", "?")
+    old_extra = data.get("extra", {})
+    rounds = int(old_extra.get("update", 0))
+    if all(new.sizes[k] == sizes[k] for k in sizes):
+        raise SystemExit("This brain already fits the current world; no surgery needed")
     print(f"Old brain: {args.old} (round {rounds})")
     for key in ("channels", "self_size", "actions", "memory"):
         print(f"  {key:10s} {sizes[key]:4d} -> {new.sizes[key]:4d}")
@@ -166,10 +175,18 @@ def main():
     print("  OK: the grown brain behaves exactly like the old one")
 
     os.makedirs(out_folder, exist_ok=True)
-    extra = {"update": 0, "total_ticks": 0, "total_samples": 0, "worlds": 1,
-             "parent": f"{args.old} round {rounds}"}
+    if in_place:
+        # Same run: keep its history, and keep the old brain just in case
+        backup = os.path.join(out_folder, f"before_surgery_round{rounds:05d}.pt")
+        torch.save(data, backup)
+        print(f"Kept the brain from before surgery as {backup}")
+        extra = dict(old_extra)
+        extra["surgeries"] = old_extra.get("surgeries", []) + [rounds]
+    else:
+        extra = {"update": 0, "total_ticks": 0, "total_samples": 0, "worlds": 1,
+                 "parent": f"{args.old} round {rounds}"}
+        save_brain(new, os.path.join(out_folder, "brain_round00000.pt"), extra)
     save_brain(new, out_path, extra)
-    save_brain(new, os.path.join(out_folder, "brain_round00000.pt"), extra)
     print(f"Saved the grown brain to {out_path}")
     print(f"Next:  python train.py --name {args.name} --resume")
 

@@ -153,6 +153,15 @@ GENE_START = {"strength": (1.0, 0.1), "hardiness": (1.0, 0.1),
 MUTATION = {"strength": 0.05, "hardiness": 0.05, "endurance": 0.05, "vision": 0.25}
 GENE_FOOD_COST = 0.5      # each +0.1 above normal adds 5% to food use
 
+# Behaviour genes (Stage 3): an inborn temperament. They cost nothing and don't
+# change the body; they nudge which actions the brain picks (src/temperament.py).
+# 0 = average, -1 = much less inclined, +1 = much more inclined.
+BEHAVIOUR_GENES = ["aggression", "generosity", "drive", "industry", "curiosity"]
+GENE_LIMITS.update({g: (-1.0, 1.0) for g in BEHAVIOUR_GENES})
+GENE_START.update({g: (0.0, 0.35) for g in BEHAVIOUR_GENES})
+MUTATION.update({g: 0.08 for g in BEHAVIOUR_GENES})
+ALL_GENES = GENE_NAMES + BEHAVIOUR_GENES
+
 # Causes of death (stored per agent)
 ALIVE = 0
 STARVATION = 1
@@ -212,11 +221,11 @@ class Agents(TechMixin):
         self.warmth = np.zeros(n)
         self.sick = np.zeros(n, dtype=np.int32)      # ticks of sickness left
 
-        self.genes = {g: np.ones(n) for g in GENE_NAMES}
+        self.genes = {g: np.ones(n) for g in ALL_GENES}
         self.willing = np.zeros(n, dtype=np.int64)   # willing to mate until this tick
         self.pregnant = np.zeros(n, dtype=np.int32)  # ticks until birth (0 = not pregnant)
         self.partner = np.full(n, -1, dtype=np.int32)
-        self.partner_genes = {g: np.ones(n) for g in GENE_NAMES}  # father's genes, saved at conception
+        self.partner_genes = {g: np.ones(n) for g in ALL_GENES}  # father's genes, saved at conception
         self.partner_generation = np.zeros(n, dtype=np.int32)
         self.rest_until = np.zeros(n, dtype=np.int64)  # can't conceive again before this tick
         self.children = np.zeros(n, dtype=np.int32)
@@ -268,7 +277,7 @@ class Agents(TechMixin):
             sexes = np.array([MALE, FEMALE] * (members // 2) + [MALE] * (members % 2))
             rng.shuffle(sexes)
             for k in range(members):
-                genes = {g: rng.normal(*GENE_START[g]) for g in GENE_NAMES}
+                genes = {g: rng.normal(*GENE_START[g]) for g in ALL_GENES}
                 age = int(rng.integers(TICKS_PER_YEAR, 2 * TICKS_PER_YEAR))
                 self.add(spots[k, 1], spots[k, 0], sexes[k], genes, age=age,
                          food=rng.uniform(60, 100), tribe=tribe)
@@ -301,7 +310,7 @@ class Agents(TechMixin):
         self.energy[i] = rng.uniform(60, 100)
         self.warmth[i] = MAX_STAT
         self.sick[i] = 0
-        for g in GENE_NAMES:
+        for g in ALL_GENES:
             self.genes[g][i] = np.clip(genes[g], *GENE_LIMITS[g])
         self.willing[i] = 0
         self.pregnant[i] = 0
@@ -564,7 +573,7 @@ class Agents(TechMixin):
                 if self.can_conceive(m):
                     self.pregnant[f] = PREGNANCY_TICKS
                     self.partner[f] = m
-                    for g in GENE_NAMES:
+                    for g in ALL_GENES:
                         self.partner_genes[g][f] = self.genes[g][m]
                     self.partner_generation[f] = self.generation[m]
                     self.rest_until[m] = tick + FATHER_REST_TICKS
@@ -588,7 +597,7 @@ class Agents(TechMixin):
     def give_birth(self, f):
         m = self.partner[f]
         genes = {}
-        for g in GENE_NAMES:
+        for g in ALL_GENES:
             # Half from each parent (the father's genes were saved at conception,
             # so this works even if he has died since), plus a small random mutation
             genes[g] = (self.genes[g][f] + self.partner_genes[g][f]) / 2 + \

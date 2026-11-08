@@ -148,24 +148,33 @@ Wolves and bears can be hunted, but it is very hard; groups and better weapons h
 ## Breeding and genes
 - Two adults of opposite sex, next to each other, both choose "mate" within a few ticks; both must be fed, watered and healthy
 - Pregnancy 3 days; the mother rests 5 days after birth; 2% risk of dying in childbirth
-- Genes: strength, hardiness, endurance, vision. Higher is better but costs extra food. A child gets the average of both parents plus a small mutation.
+- Body genes: strength, hardiness, endurance, vision. Higher is better but costs extra food. A child gets the average of both parents plus a small mutation.
+- Behaviour genes (Stage 3), an inborn temperament from -1 to +1 (founders start near 0). They cost nothing; they nudge the brain's action scores before choosing (`src/temperament.py`). A gene of +1 makes its actions about 2.7 times as likely; the brain can still overrule it.
+
+| Gene | Nudges |
+|---|---|
+| aggression | attack a person (and a little: attack an animal) |
+| generosity | give |
+| drive | mate |
+| industry | craft, build, plant |
+| curiosity | all choices more random (higher) or more fixed (lower) |
 
 ## What agents sense
 - **View:** a 15 x 15 square of tiles, with one channel per question: ground type, berries (red / purple), crops, fire, flood, ash, piles, animals, people (man, woman, child, armed), visibility, resource deposits, each structure type, sick person, own-tribe person, other-tribe person, and calls heard
-- **Self:** body stats, pain, sickness, pregnancy, age, sex, everything carried, weapon and tools, genes, time of day, season, storm, last action, blueprint, direction faced, calls heard, tribe
+- **Self:** body stats, pain, sickness, pregnancy, age, sex, everything carried, weapon and tools, body genes, time of day, season, storm, last action, blueprint, direction faced, calls heard, tribe, behaviour genes (99 numbers)
 
 ## Learning
 1. **Shared learning (culture):** agents learn with PPO (an actor-critic method); every agent's experience trains the brain.
-2. **Evolution (genes):** inherited genes shape bodies (and, from Stage 3, behaviour).
+2. **Evolution (genes):** inherited genes shape bodies and, through behaviour genes, temperament. Evolution favours whatever temperament survives and breeds best; the shared brain learns how to make the most of each one.
 
 3. **Memory (Stage 3):** a GRU layer keeps 128 numbers per agent from one tick to the next, so an agent can remember what it can no longer see. A newborn starts with an empty memory. While learning, decisions are replayed in 16-tick stretches of one agent's life, so the brain learns what was worth remembering.
-4. **Brain surgery (Stage 3):** when the world gains senses or actions, `surgery.py` grows the old brain into the new shape. Old weights are copied; new senses start ignored (zero weights); new actions start with a small share of the chances (10% in total); the memory starts ignored. A check confirms the grown brain chooses exactly like the old one. run2 starts from run1 this way.
+4. **Brain surgery (Stage 3):** when the world gains senses or actions, `surgery.py` grows the old brain into the new shape. Old weights are copied; new senses start ignored (zero weights); new actions start with a small share of the chances (10% in total); the memory starts ignored. A check confirms the grown brain chooses exactly like the old one. run2 started from run1 this way. A run can also be upgraded **in place** (same run, round count kept, old brain backed up), which is the normal step of the long-term plan.
 
-Still planned for Stage 3: behaviour genes, and **one brain per tribe**, so each tribe can develop its own culture.
+Still planned for Stage 3: **one brain per tribe**, so each tribe can develop its own culture.
 
 ## Measurements
 - Training: survival, reward, curiosity, births, causes of death (`analyze.py runs/<name>`)
-- History runs: population by tribe, births and deaths, causes of death, what agents do, violence, hunting, crafting, farming, building, sharing, calls, genes over generations, animals, heatmap, family trees (`analyze.py experiments/<name>`)
+- History runs: population by tribe, births and deaths, causes of death, what agents do, violence, hunting, crafting, farming, building, sharing, calls, body and behaviour genes over generations, animals, heatmap, family trees (`analyze.py experiments/<name>`)
 
 ## Build stages
 1. World, viewer, agents, animals, dangers (done)
@@ -173,7 +182,7 @@ Still planned for Stage 3: behaviour genes, and **one brain per tribe**, so each
 3. Learning: senses, rewards, brain, PPO trainer (done)
 4. Stage 1 tools: history runs, replays, charts, family trees, heatmaps (done)
 5. Stage 2: the bigger world: resources and metal ages, fire, building, disease, migration, sharing, calls, tribes, parenting (done)
-6. **Stage 3: the bigger brain:** memory and brain surgery from run1 (done); behaviour genes, tribe brains (in progress)
+6. **Stage 3: the bigger brain:** memory, brain surgery, behaviour genes (done); tribe brains (in progress)
 7. Stage 4: faster training (several worlds at once) and comparison experiments
 8. Keep adding realism while training continues
 9. Final experiment: big world with continents

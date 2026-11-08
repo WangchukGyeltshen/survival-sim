@@ -23,7 +23,7 @@ from collections import Counter
 
 import numpy as np
 
-from src.agents import (NUM_ACTIONS, ACTION_NAMES, DEATH_CAUSES, GENE_NAMES, ADULT_AGE,
+from src.agents import (NUM_ACTIONS, ACTION_NAMES, DEATH_CAUSES, ALL_GENES, ADULT_AGE,
                         TICKS_PER_YEAR, MALE)
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.world import TICKS_PER_DAY, FARMLAND, STRUCTURE_NAMES
@@ -93,7 +93,7 @@ class Recorder:
             "generation": int(a.generation[i]),
             "tribe": int(a.tribe[i]),
             "died_tick": -1, "cause": "", "children": 0, "kills": 0,
-            **{f"gene_{g}": round(float(a.genes[g][i]), 3) for g in GENE_NAMES},
+            **{f"gene_{g}": round(float(a.genes[g][i]), 3) for g in ALL_GENES},
         })
         self.person_id[i] = pid
         return pid
@@ -188,7 +188,7 @@ class Recorder:
         row["picks"] = int((alive & (a.pick > 0)).sum())
         row["sickles"] = int((alive & (a.sickle > 0)).sum())
         row["sick"] = int((alive & (a.sick > 0)).sum())
-        for g in GENE_NAMES:
+        for g in ALL_GENES:
             row[f"gene_{g}"] = round(float(a.genes[g][alive].mean()), 4) if alive.any() else 0
         for kind in ("attacked", "killed", "hunted", "crafted", "planted", "harvested",
                      "conceived", "poisoned", "got sick", "looted", "built", "repaired", "destroyed",
