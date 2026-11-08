@@ -35,7 +35,8 @@ class HistoryRun(train.Trainer):
 
     def __init__(self, args):
         train_args = argparse.Namespace(name=os.path.join("..", "experiments", args.name, "brain"),
-                                        resume=False, no_watch=args.no_watch, cpu=args.cpu)
+                                        resume=False, no_watch=args.no_watch, cpu=args.cpu,
+                                        worlds=1)          # a history follows just one world
         super().__init__(train_args)
         self.args = args
         self.folder_out = os.path.join("experiments", args.name)
@@ -61,10 +62,10 @@ class HistoryRun(train.Trainer):
         self.recorder = Recorder(self.sim, self.folder_out, info)
         self.tick_hooks.append(self.recorder.record_tick)
 
-    def should_reset(self):
+    def should_reset(self, k=0):
         return False                       # history never restarts
 
-    def next_world(self):
+    def next_world(self, k=0):
         self.stop = True                   # everyone has died: the story is over
 
     def finished(self):
@@ -92,12 +93,12 @@ class HistoryRun(train.Trainer):
             a = sim.agents
             idx = np.flatnonzero(a.alive)
             view, feats = observe(sim, idx)
-            memory = self.bank.get(a, idx)
+            memory = self.banks[0].get(idx, a.spawn_tick[idx])
             temper = torch.from_numpy(temperament(a, idx)).to(self.device)
             acts, _, _, memory = self.brain.act(torch.from_numpy(view).to(self.device),
                                                 torch.from_numpy(feats).to(self.device), memory, temper,
                                                 a.tribe[idx])
-            self.bank.set(idx, memory)
+            self.banks[0].set(idx, memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()
             alive_before = a.alive.copy()

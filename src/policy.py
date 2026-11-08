@@ -30,7 +30,7 @@ class BrainPolicy:
         idx = np.flatnonzero(sim.agents.alive)
         if len(idx):
             view, feats = observe(sim, idx)
-            memory = self.bank.get(sim.agents, idx)
+            memory = self.bank.get(idx, sim.agents.spawn_tick[idx])
             temper = torch.from_numpy(temperament(sim.agents, idx)).to(self.device)
             acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory, temper,
                                                 sim.agents.tribe[idx])

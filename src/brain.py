@@ -151,13 +151,14 @@ class MemoryBank:
         self.memory = brain.empty_memory(capacity, device)
         self.owner = np.full(capacity, -1, dtype=np.int64)
 
-    def get(self, agents, idx):
-        idx = np.asarray(idx)
-        new = agents.spawn_tick[idx] != self.owner[idx]
+    def get(self, idx, spawn):
+        """Memories of the agents in slots idx (spawn: their spawn ticks)."""
+        idx, spawn = np.asarray(idx), np.asarray(spawn)
+        new = spawn != self.owner[idx]
         if new.any():
             rows = idx[new]
             self.memory[torch.from_numpy(rows).to(self.device)] = 0
-            self.owner[rows] = agents.spawn_tick[rows]
+            self.owner[rows] = spawn[new]
         return self.memory[torch.from_numpy(idx).to(self.device)]
 
     def set(self, idx, memory):

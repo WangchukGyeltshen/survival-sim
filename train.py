@@ -5,18 +5,23 @@
     python train.py --no-watch       train without the window (fastest)
     python train.py --name run2      keep a separate experiment in runs/run2
     python train.py --brains 1       a new run with ONE brain shared by all tribes
+    python train.py --worlds 6       run 6 worlds at once (default 4; 1 = old behaviour)
 
 Each tribe has its own brain (Stage 3), trained only on its own members'
 experience. Resuming a run saved with one shared brain splits it: every
 tribe's brain starts as a copy of it, and from then on they grow apart.
+
+Several worlds run at once (Stage 4, src/worlds.py): world 0 in this process
+(the one the window shows), the others in worker processes on other CPU
+cores. Each round of learning mixes decisions from all of them.
 
 In the window: T = turbo (stop drawing, train at full speed), SPACE = pause,
 +/- = slow down / speed up (MAX = as fast as possible). Closing the window
 saves the brain and stops training. Ctrl+C in the terminal does the same.
 
 HOW ONE ROUND OF LEARNING WORKS
-1. COLLECT: every living agent uses the current brain for a while (until about
-   32,000 decisions have been made). For each decision we store what the agent
+1. COLLECT: every living agent, in every world, uses the current brains for a
+   while (until about 32,000 decisions have been made). For each decision we store what the agent
    saw, what it did, how sure the brain was, the critic's guess and the reward.
 2. JUDGE: for every decision, work out its ADVANTAGE: did things turn out
    better or worse than the critic expected? (using the GAE method below)
@@ -39,12 +44,9 @@ from collections import Counter
 import numpy as np
 import torch
 
-from src.simulation import Simulation
-from src.observe import observe
+from src.worlds import World, RemoteWorld, make_sim
 from src.brain import TribeBrains, MemoryBank, save_brains, load_into
-from src.rewards import compute_rewards
-from src.temperament import temperament
-from src.agents import NUM_ACTIONS, OLD_AGE, DEATH_CAUSES, NUM_TRIBES
+from src.agents import NUM_ACTIONS, DEATH_CAUSES, NUM_TRIBES
 from src.world import TICKS_PER_DAY
 
 # ---------------- settings ----------------
@@ -63,12 +65,12 @@ MAX_GRAD = 0.5             # caps any single nudge
 MIN_POPULATION = 20        # fewer alive than this: start a fresh world
 MAX_WORLD_DAYS = 100       # also start a fresh world after this long (variety)
 SNAPSHOT_EVERY = 50        # keep a copy of the brain every 50 rounds
+WORLDS = 4                 # worlds running at once (each extra one uses another CPU core)
 DRAW_FPS = 30
 
 
 def new_world():
-    seed = int(np.random.default_rng().integers(1_000_000))
-    return Simulation(size=128, agents=200, seed=seed)
+    return make_sim()
 
 
 class Trainer:
@@ -111,10 +113,16 @@ class Trainer:
             self.surgeries = extra.get("surgeries", [])
             print(f"Resumed from round {self.update}"
                   + (f" (brain grown from {self.parent})" if self.parent else ""))
-        self.sim = None
-        self.bank = None
-        self.set_world(new_world())
+        # World 0 here (shown in the window), the rest in worker processes
+        count_worlds = max(1, getattr(args, "worlds", None) or 1)
+        self.envs = [World(new_world())] + [RemoteWorld() for _ in range(count_worlds - 1)]
+        self.banks = [None] * count_worlds        # each world's agents' memories
+        self.obs = [None] * count_worlds          # what each world's agents sense right now
         self.viewer = None
+        self.set_world(self.envs[0].sim)
+        for k in range(1, count_worlds):
+            self.obs[k] = self.envs[k].observe()
+            self.banks[k] = MemoryBank(self.brain, self.obs[k]["count"], self.device)
         if not args.no_watch:
             from src.viewer import Viewer, SPEEDS
             self.viewer = Viewer(self.sim)
@@ -126,7 +134,15 @@ class Trainer:
         self.log_path = os.path.join(self.folder, "log.csv")
         self.recent_life = []        # days survived by agents who died recently
         self.tick_hooks = []         # functions(actions, acted) called after every tick
-        print(f"Training on: {self.device}  |  saving to: {self.folder}")
+        print(f"Training on: {self.device}  |  worlds at once: {count_worlds}  |  saving to: {self.folder}")
+
+    @property
+    def sim(self):
+        """World 0 (the one in this process, shown in the window)."""
+        return self.envs[0].sim
+
+    def population(self):
+        return sum(o["population"] for o in self.obs)
 
     # ---------------- the window ----------------
     def watch(self):
@@ -160,6 +176,7 @@ class Trainer:
         life = np.mean(self.recent_life[-300:]) if self.recent_life else 0
         lines = [f"TRAINING  round {self.update}",
                  f"world #{self.worlds}   ticks trained {self.total_ticks:,}",
+                 f"worlds at once: {len(self.envs)} (showing world 1)   alive in all: {self.population()}",
                  f"avg days survived (recent): {life:.2f}",
                  f"brains: {self.brain.count}" + (" (one per tribe)" if self.brain.count > 1 else " (shared)")]
         if stats:
@@ -170,74 +187,83 @@ class Trainer:
 
     # ---------------- 1. COLLECT ----------------
     def collect(self):
-        sim, brain = self.sim, self.brain
-        steps = []          # one entry per tick
+        brain = self.brain
+        steps = []          # one entry per world per tick
         samples = 0
         births = 0
         rewards_total = 0.0
-        agent_ticks = 0
+        ticks = 0
         deaths = Counter()
-        while samples < BATCH_SAMPLES and len(steps) < MAX_ROLLOUT_TICKS and not self.stop:
-            a = sim.agents
-            idx = np.flatnonzero(a.alive)
-            if len(idx) == 0:
+        while samples < BATCH_SAMPLES and ticks < MAX_ROLLOUT_TICKS and not self.stop:
+            live = [k for k, o in enumerate(self.obs) if o["population"]]
+            if not live:
                 break
-            view, feats = observe(sim, idx)
-            view_t = torch.from_numpy(view).to(self.device)
+            # Everyone in every world decides at once (one go per tribe brain)
+            cat = lambda key: np.concatenate([self.obs[k][key] for k in live])
+            view, feats, tribes, temper = cat("view"), cat("feats"), cat("tribe"), cat("temper")
+            memory = torch.cat([self.banks[k].get(self.obs[k]["idx"], self.obs[k]["spawn"]) for k in live])
+            view_t = torch.from_numpy(view).to(self.device).float() / 255
             feats_t = torch.from_numpy(feats).to(self.device)
-            memory = self.bank.get(a, idx)
-            temper = temperament(a, idx)                         # inborn leanings (behaviour genes)
-            tribes = a.tribe[idx].copy()                         # each uses its own tribe's brain
             acts, logp, values, new_memory = brain.act(view_t, feats_t, memory,
                                                        torch.from_numpy(temper).to(self.device), tribes)
-            self.bank.set(idx, new_memory)
-            actions = np.zeros(a.count, dtype=np.int64)
-            actions[idx] = acts.cpu().numpy()
+            acts, logp, values = acts.cpu().numpy(), logp.cpu().numpy(), values.cpu().numpy()
+            memory_np = memory.cpu().numpy()
+            which = brain.which(tribes)
 
-            alive_before = a.alive.copy()
-            sim.step(actions)
-            for hook in self.tick_hooks:
-                hook(actions, alive_before)
-            died = alive_before & ~a.alive
-            rewards, done = compute_rewards(a, alive_before, died)
-
-            steps.append({
-                "idx": idx,
-                "spawn": a.spawn_tick[idx].astype(np.int64),     # tells apart people who shared a slot
-                "memory": memory.cpu().numpy(),                  # what they remembered before deciding
-                "temper": temper,
-                "brain": brain.which(tribes),
-                "view": (view * 255).astype(np.uint8),     # stored small to save memory
-                "feats": feats,
-                "actions": actions[idx],
-                "logp": logp.cpu().numpy(),
-                "values": values.cpu().numpy(),
-                "rewards": rewards[idx],
-                "done": done[idx],
-            })
-            samples += len(idx)
-            agent_ticks += len(idx)
-            rewards_total += float(rewards[idx].sum())
-            births += len(a.new_parents)
-            for i in np.flatnonzero(died):
-                deaths[DEATH_CAUSES[a.cause_of_death[i]]] += 1
-                if a.cause_of_death[i] != OLD_AGE:
-                    self.recent_life.append((a.death_tick[i] - a.spawn_tick[i]) / TICKS_PER_DAY)
+            # Hand each world its actions: workers start stepping right away,
+            # world 0 steps in this process while they work
+            parts = np.cumsum([0] + [self.obs[k]["population"] for k in live])
+            for j, k in enumerate(live):
+                rows = slice(parts[j], parts[j + 1])
+                self.banks[k].set(self.obs[k]["idx"], new_memory[rows])
+                self.envs[k].start_step(self.obs[k]["idx"], acts[rows])
+            for j, k in enumerate(live):
+                rows = slice(parts[j], parts[j + 1])
+                o = self.obs[k]
+                result = self.envs[k].finish_step()
+                if k == 0:
+                    for hook in self.tick_hooks:
+                        hook(result["actions"], result["alive_before"])
+                steps.append({
+                    "world": k,
+                    "idx": o["idx"],
+                    "spawn": o["spawn"],                      # tells apart people who shared a slot
+                    "memory": memory_np[rows],                # what they remembered before deciding
+                    "temper": o["temper"],
+                    "brain": which[rows],
+                    "view": o["view"],
+                    "feats": o["feats"],
+                    "actions": acts[rows],
+                    "logp": logp[rows],
+                    "values": values[rows],
+                    "rewards": result["rewards"],
+                    "done": result["done"],
+                })
+                samples += o["population"]
+                rewards_total += float(result["rewards"].sum())
+                births += result["births"]
+                for cause, days, old_age in result["deaths"]:
+                    deaths[cause] += 1
+                    if not old_age:
+                        self.recent_life.append(days)
+                self.obs[k] = result["obs"]
+            ticks += 1
             self.watch()
 
         # The critic's guess for agents still alive at the end ("what comes next")
-        bootstrap = np.zeros(sim.agents.count, dtype=np.float32)
-        idx = np.flatnonzero(sim.agents.alive)
-        if len(idx):
-            view, feats = observe(sim, idx)
-            with torch.no_grad():
-                v = brain.value(torch.from_numpy(view).to(self.device), torch.from_numpy(feats).to(self.device),
-                                self.bank.get(sim.agents, idx), sim.agents.tribe[idx])
-            bootstrap[idx] = v.cpu().numpy()
-        self.total_ticks += len(steps)
+        bootstrap = {}
+        for k, o in enumerate(self.obs):
+            bootstrap[k] = np.zeros(o["count"], dtype=np.float32)
+            if o["population"]:
+                with torch.no_grad():
+                    v = brain.value(torch.from_numpy(o["view"]).to(self.device).float() / 255,
+                                    torch.from_numpy(o["feats"]).to(self.device),
+                                    self.banks[k].get(o["idx"], o["spawn"]), o["tribe"])
+                bootstrap[k][o["idx"]] = v.cpu().numpy()
+        self.total_ticks += ticks * len(self.envs)
         self.total_samples += samples
-        stats = {"samples": samples, "ticks": len(steps), "births": births, "deaths": deaths,
-                 "reward_per_day": rewards_total / max(agent_ticks, 1) * TICKS_PER_DAY}
+        stats = {"samples": samples, "ticks": ticks, "births": births, "deaths": deaths,
+                 "reward_per_day": rewards_total / max(samples, 1) * TICKS_PER_DAY}
         return steps, bootstrap, stats
 
     # ---------------- 2. JUDGE (advantages) ----------------
@@ -245,20 +271,21 @@ class Trainer:
         """GAE: work backwards through time. For each decision:
             surprise = reward + GAMMA * (critic's guess for the next tick) - (critic's guess now)
             advantage = surprise + GAMMA * LAMBDA * (next tick's advantage)
-        A death ends an agent's story, so nothing after it counts."""
-        n = len(bootstrap)
-        next_value = bootstrap.copy()
-        next_adv = np.zeros(n, dtype=np.float32)
+        A death ends an agent's story, so nothing after it counts.
+        Each world is worked through separately (slot numbers are per world)."""
+        next_value = {k: v.copy() for k, v in bootstrap.items()}
+        next_adv = {k: np.zeros(len(v), dtype=np.float32) for k, v in bootstrap.items()}
         for step in reversed(steps):
             idx, done = step["idx"], step["done"]
-            nv = np.where(done, 0.0, next_value[idx])
-            na = np.where(done, 0.0, next_adv[idx])
+            next_value_w, next_adv_w = next_value[step["world"]], next_adv[step["world"]]
+            nv = np.where(done, 0.0, next_value_w[idx])
+            na = np.where(done, 0.0, next_adv_w[idx])
             surprise = step["rewards"] + GAMMA * nv - step["values"]
             adv = surprise + GAMMA * GAE_LAMBDA * na
             step["adv"] = adv.astype(np.float32)
             step["returns"] = (adv + step["values"]).astype(np.float32)
-            next_value[idx] = step["values"]
-            next_adv[idx] = adv
+            next_value_w[idx] = step["values"]
+            next_adv_w[idx] = adv
 
     # ---------------- 3. LEARN (PPO) ----------------
     def learn(self, steps):
@@ -267,13 +294,14 @@ class Trainer:
         actions, old_logp = cat("actions"), cat("logp")
         adv, returns = cat("adv"), cat("returns")
         memory, slot, spawn, temper = cat("memory"), cat("idx"), cat("spawn"), cat("temper")
+        world = np.concatenate([np.full(len(s["idx"]), s["world"]) for s in steps])
         which = cat("brain")
         # Scale each brain's advantages to an average of 0 and spread of 1 (steadier learning)
         adv = adv.astype(np.float32)
         for b in np.unique(which):
             rows = which == b
             adv[rows] = (adv[rows] - adv[rows].mean()) / (adv[rows].std() + 1e-8)
-        layout = self.stretches(slot, spawn)
+        layout = self.stretches(slot, spawn, world)
         start_memory = memory[layout[:, 0]]
         stretch_brain = which[layout[:, 0]]          # a whole life uses one brain
         per_minibatch = MINIBATCH // SEQ_LEN
@@ -332,13 +360,15 @@ class Trainer:
         return {k: v / max(updates, 1) for k, v in totals.items()}
 
     @staticmethod
-    def stretches(slot, spawn):
+    def stretches(slot, spawn, world=None):
         """Cut every agent's life (in this batch) into stretches of SEQ_LEN ticks.
         Returns a table (stretches x SEQ_LEN) of decision rows, -1 = padding.
-        Decisions are stored tick by tick, so sorting by person (slot + spawn
-        tick) while keeping the original order puts each life in time order."""
+        Decisions are stored tick by tick, so sorting by person (world + slot +
+        spawn tick) while keeping the original order puts each life in time order."""
         n = len(slot)
         life = slot.astype(np.int64) * (1 << 32) + spawn
+        if world is not None:
+            life += np.asarray(world, dtype=np.int64) << 43
         order = np.argsort(life, kind="stable")
         sorted_life = life[order]
         new_life = np.r_[True, sorted_life[1:] != sorted_life[:-1]]
@@ -363,7 +393,7 @@ class Trainer:
         life = np.mean(self.recent_life[-300:]) if self.recent_life else 0
         row = {"round": self.update, "world": self.worlds, "world_day": self.sim.world.day,
                "ticks": self.total_ticks, "samples": self.total_samples,
-               "population": self.sim.agents.population, "births": stats["births"],
+               "population": self.population(), "births": stats["births"],
                "avg_days_survived": round(life, 3),
                "reward_per_day": round(stats["reward_per_day"], 4),
                "curiosity": round(stats["curiosity"], 4),
@@ -380,7 +410,7 @@ class Trainer:
             writer.writerow(row)
         top = ", ".join(f"{c} {n}" for c, n in stats["deaths"].most_common(3))
         print(f"round {self.update:5d} | world {self.worlds} day {self.sim.world.day:3d} | "
-              f"pop {self.sim.agents.population:4d} | survived {life:5.2f} days | "
+              f"pop {self.population():4d} | survived {life:5.2f} days | "
               f"reward/day {stats['reward_per_day']:5.2f} | curiosity {stats['curiosity']:4.0%} | "
               f"births {stats['births']:3d} | deaths: {top} | {seconds:4.1f}s")
 
@@ -391,8 +421,9 @@ class Trainer:
                 start = time.time()
                 steps, bootstrap, stats = self.collect()
                 if self.stop or not steps:
-                    if not steps:
-                        self.next_world()
+                    if not steps:                       # everyone everywhere has died
+                        for k in range(len(self.envs)):
+                            self.next_world(k)
                     continue
                 self.advantages(steps, bootstrap)
                 learn_stats = self.learn(steps)
@@ -402,27 +433,39 @@ class Trainer:
                 self.log(stats, learn_stats, time.time() - start)
                 if self.viewer:
                     self.viewer.training_info = self.info_lines(stats)
-                if self.should_reset():
-                    self.next_world()
+                for k in range(len(self.envs)):
+                    if self.should_reset(k):
+                        self.next_world(k)
         except KeyboardInterrupt:
             pass
         self.save()
+        self.close()
         print(f"Stopped. Brain saved to {self.folder}/latest.pt")
 
-    def should_reset(self):
-        return (self.sim.agents.population < MIN_POPULATION
-                or self.sim.world.day >= MAX_WORLD_DAYS)
+    def should_reset(self, k=0):
+        return (self.obs[k]["population"] < MIN_POPULATION
+                or self.obs[k]["day"] >= MAX_WORLD_DAYS)
 
     def set_world(self, sim):
-        """Use a new world. Everyone in it starts with an empty memory."""
-        self.sim = sim
-        self.bank = MemoryBank(self.brain, sim.agents.count, self.device)
-        if getattr(self, "viewer", None):
+        """Use a new world as world 0. Everyone in it starts with an empty memory."""
+        self.envs[0].sim = sim
+        self.obs[0] = self.envs[0].observe()
+        self.banks[0] = MemoryBank(self.brain, sim.agents.count, self.device)
+        if self.viewer:
             self.viewer.set_sim(sim)
 
-    def next_world(self):
-        self.set_world(new_world())
+    def next_world(self, k=0):
+        """Replace world k with a fresh one."""
+        if k == 0:
+            self.set_world(new_world())
+        else:
+            self.obs[k] = self.envs[k].reset()
+            self.banks[k] = MemoryBank(self.brain, self.obs[k]["count"], self.device)
         self.worlds += 1
+
+    def close(self):
+        for env in self.envs:
+            env.close()
 
 
 if __name__ == "__main__":
@@ -431,6 +474,8 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="continue from runs/<name>/latest.pt")
     parser.add_argument("--no-watch", action="store_true", help="train without the window")
     parser.add_argument("--cpu", action="store_true", help="don't use the GPU")
+    parser.add_argument("--worlds", type=int, default=WORLDS,
+                        help=f"worlds running at once (default {WORLDS}; each extra one uses another CPU core)")
     parser.add_argument("--brains", type=int, choices=[1, NUM_TRIBES], default=None,
                         help=f"new runs only: {NUM_TRIBES} = one brain per tribe (default), 1 = one shared brain")
     Trainer(parser.parse_args()).run()
