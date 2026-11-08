@@ -47,18 +47,23 @@ class HistoryRun(train.Trainer):
             self.optimizers = [torch.optim.Adam(b.parameters(), lr=train.LEARNING_RATE, eps=1e-5)
                                for b in self.brain.brains]
             load_into(self.brain, data, args.brain)
+            self.use_temperament = data.get("extra", {}).get("temperament", True)
             print(f"Loaded brain: {args.brain} ({count} brain{'s' if count > 1 else ''})")
         elif not args.blank:
             raise SystemExit("Give a brain with --brain runs/run2/latest.pt, or use --blank for an untrained one")
         else:
             print("Using a blank (untrained) brain: this is the control experiment")
 
+        if args.no_temperament:
+            self.use_temperament = False
+
         # One fixed world for the whole history
         self.set_world(Simulation(size=128, agents=200, seed=args.seed))
         if self.viewer:
             self.viewer.training = True
         info = {"name": args.name, "seed": args.seed, "brain": None if args.blank else args.brain,
-                "learning": not args.frozen, "started": time.strftime("%Y-%m-%d %H:%M")}
+                "learning": not (args.frozen or args.blank), "brains": self.brain.count,
+                "temperament": self.use_temperament, "started": time.strftime("%Y-%m-%d %H:%M")}
         self.recorder = Recorder(self.sim, self.folder_out, info)
         self.tick_hooks.append(self.recorder.record_tick)
 
@@ -94,7 +99,7 @@ class HistoryRun(train.Trainer):
             idx = np.flatnonzero(a.alive)
             view, feats = observe(sim, idx)
             memory = self.banks[0].get(idx, a.spawn_tick[idx])
-            temper = torch.from_numpy(temperament(a, idx)).to(self.device)
+            temper = torch.from_numpy(temperament(a, idx)).to(self.device) if self.use_temperament else None
             acts, _, _, memory = self.brain.act(torch.from_numpy(view).to(self.device),
                                                 torch.from_numpy(feats).to(self.device), memory, temper,
                                                 a.tribe[idx])
@@ -153,6 +158,8 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=0, help="stop after this many days (0 = never)")
     parser.add_argument("--no-watch", action="store_true", help="no window (faster)")
     parser.add_argument("--cpu", action="store_true", help="don't use the GPU")
+    parser.add_argument("--no-temperament", action="store_true",
+                        help="behaviour genes don't nudge choices (default: as the brain was trained)")
     run_args = parser.parse_args()
     if os.path.exists(os.path.join("experiments", run_args.name, "daily.csv")):
         raise SystemExit(f"experiments/{run_args.name} already exists; pick another --name")

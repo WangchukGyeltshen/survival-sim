@@ -170,6 +170,7 @@ Wolves and bears can be hunted, but it is very hard; groups and better weapons h
 3. **Memory (Stage 3):** a GRU layer keeps 128 numbers per agent from one tick to the next, so an agent can remember what it can no longer see. A newborn starts with an empty memory. While learning, decisions are replayed in 16-tick stretches of one agent's life, so the brain learns what was worth remembering.
 4. **Brain surgery (Stage 3):** when the world gains senses or actions, `surgery.py` grows the old brain into the new shape. Old weights are copied; new senses start ignored (zero weights); new actions start with a small share of the chances (10% in total); the memory starts ignored. A check confirms the grown brain chooses exactly like the old one. run2 started from run1 this way. A run can also be upgraded **in place** (same run, round count kept, old brain backed up), which is the normal step of the long-term plan.
 5. **Parallel worlds (Stage 4):** training runs several worlds at once (4 by default, `--worlds N`). World 0 runs in the main process and is the one the window shows; the others run in worker processes on other CPU cores. Every tick, all agents in all worlds decide in one go on the GPU. Each learning round therefore mixes decisions from several worlds, seasons and situations, and collecting them takes little longer than for one world. Each world resets on its own (fewer than 20 alive, or after 100 days).
+6. **Comparison experiments (Stage 4):** `compare.py` draws 2 or more runs on the same charts with a report page. Training runs are lined up by decisions trained (survival, reward, curiosity, births, speed, causes of death); history runs by day (population, births, deaths, generations, weapons, violence, food work, structures, sharing, genes, causes of death). Switches for one-change comparisons: `--brains 1` (one shared brain instead of tribe brains) and `--no-temperament` (behaviour genes inherited but not nudging choices); trained vs untrained brains in the same world use `experiment.py --seed`.
 
 ## Measurements
 - Training: survival, reward, curiosity, births, causes of death (`analyze.py runs/<name>`)
@@ -182,6 +183,6 @@ Wolves and bears can be hunted, but it is very hard; groups and better weapons h
 4. Stage 1 tools: history runs, replays, charts, family trees, heatmaps (done)
 5. Stage 2: the bigger world: resources and metal ages, fire, building, disease, migration, sharing, calls, tribes, parenting (done)
 6. Stage 3: the bigger brain: memory, brain surgery, behaviour genes, tribe brains (done)
-7. **Stage 4:** faster training with several worlds at once (done); comparison experiments (in progress)
-8. Keep adding realism while training continues
+7. Stage 4: faster training with several worlds at once, comparison experiments (done)
+8. **Next:** keep adding realism while training continues
 9. Final experiment: big world with continents

@@ -6,6 +6,7 @@
     python train.py --name run2      keep a separate experiment in runs/run2
     python train.py --brains 1       a new run with ONE brain shared by all tribes
     python train.py --worlds 6       run 6 worlds at once (default 4; 1 = old behaviour)
+    python train.py --no-temperament a new run where behaviour genes don't nudge choices
 
 Each tribe has its own brain (Stage 3), trained only on its own members'
 experience. Resuming a run saved with one shared brain splits it: every
@@ -90,6 +91,8 @@ class Trainer:
                            for b in self.brain.brains]
         self.parent = None
         self.surgeries = []
+        # Behaviour genes nudge choices unless switched off (for comparison runs)
+        self.use_temperament = not getattr(args, "no_temperament", False)
         self.update = 0
         self.total_ticks = 0
         self.total_samples = 0
@@ -111,6 +114,7 @@ class Trainer:
             self.worlds = extra.get("worlds", 1)
             self.parent = extra.get("parent")
             self.surgeries = extra.get("surgeries", [])
+            self.use_temperament = extra.get("temperament", True)   # a run keeps its setting
             print(f"Resumed from round {self.update}"
                   + (f" (brain grown from {self.parent})" if self.parent else ""))
         # World 0 here (shown in the window), the rest in worker processes
@@ -178,7 +182,8 @@ class Trainer:
                  f"world #{self.worlds}   ticks trained {self.total_ticks:,}",
                  f"worlds at once: {len(self.envs)} (showing world 1)   alive in all: {self.population()}",
                  f"avg days survived (recent): {life:.2f}",
-                 f"brains: {self.brain.count}" + (" (one per tribe)" if self.brain.count > 1 else " (shared)")]
+                 f"brains: {self.brain.count}" + (" (one per tribe)" if self.brain.count > 1 else " (shared)")
+                 + ("" if self.use_temperament else "   temperament: off")]
         if stats:
             lines += [f"reward per agent per day: {stats['reward_per_day']:.2f}",
                       f"curiosity (entropy): {stats['curiosity']:.0%}",
@@ -204,8 +209,8 @@ class Trainer:
             memory = torch.cat([self.banks[k].get(self.obs[k]["idx"], self.obs[k]["spawn"]) for k in live])
             view_t = torch.from_numpy(view).to(self.device).float() / 255
             feats_t = torch.from_numpy(feats).to(self.device)
-            acts, logp, values, new_memory = brain.act(view_t, feats_t, memory,
-                                                       torch.from_numpy(temper).to(self.device), tribes)
+            temper_t = torch.from_numpy(temper).to(self.device) if self.use_temperament else None
+            acts, logp, values, new_memory = brain.act(view_t, feats_t, memory, temper_t, tribes)
             acts, logp, values = acts.cpu().numpy(), logp.cpu().numpy(), values.cpu().numpy()
             memory_np = memory.cpu().numpy()
             which = brain.which(tribes)
@@ -334,7 +339,7 @@ class Trainer:
                 ret_t = torch.from_numpy(returns[mb]).to(self.device)
                 m_t = torch.from_numpy(start_memory[chosen]).to(self.device)
                 lay_t = torch.from_numpy(local).to(self.device)
-                t_t = torch.from_numpy(temper[mb]).to(self.device)
+                t_t = torch.from_numpy(temper[mb]).to(self.device) if self.use_temperament else None
 
                 new_logp, entropy, value = brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t, t_t)
                 # How much more (or less) likely is this action now than when it was taken?
@@ -384,7 +389,7 @@ class Trainer:
     def save(self):
         extra = {"update": self.update, "total_ticks": self.total_ticks,
                  "total_samples": self.total_samples, "worlds": self.worlds, "parent": self.parent,
-                 "surgeries": self.surgeries}
+                 "surgeries": self.surgeries, "temperament": self.use_temperament}
         save_brains(self.brain, os.path.join(self.folder, "latest.pt"), extra, self.optimizers)
         if self.update % SNAPSHOT_EVERY == 0:
             save_brains(self.brain, os.path.join(self.folder, f"brain_round{self.update:05d}.pt"), extra)
@@ -476,6 +481,8 @@ if __name__ == "__main__":
     parser.add_argument("--cpu", action="store_true", help="don't use the GPU")
     parser.add_argument("--worlds", type=int, default=WORLDS,
                         help=f"worlds running at once (default {WORLDS}; each extra one uses another CPU core)")
+    parser.add_argument("--no-temperament", action="store_true",
+                        help="new runs only: behaviour genes are inherited but don't nudge choices")
     parser.add_argument("--brains", type=int, choices=[1, NUM_TRIBES], default=None,
                         help=f"new runs only: {NUM_TRIBES} = one brain per tribe (default), 1 = one shared brain")
     Trainer(parser.parse_args()).run()

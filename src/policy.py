@@ -16,9 +16,10 @@ def to_tensors(view, self_feats, device):
 class BrainPolicy:
     """brain: TribeBrains (each agent uses its own tribe's brain)."""
 
-    def __init__(self, brain, device):
+    def __init__(self, brain, device, temperament=True):
         self.brain = brain
         self.device = device
+        self.use_temperament = temperament      # behaviour genes nudge choices
         self.sim = None
         self.bank = None
 
@@ -31,7 +32,8 @@ class BrainPolicy:
         if len(idx):
             view, feats = observe(sim, idx)
             memory = self.bank.get(idx, sim.agents.spawn_tick[idx])
-            temper = torch.from_numpy(temperament(sim.agents, idx)).to(self.device)
+            temper = (torch.from_numpy(temperament(sim.agents, idx)).to(self.device)
+                      if self.use_temperament else None)
             acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory, temper,
                                                 sim.agents.tribe[idx])
             self.bank.set(idx, memory)

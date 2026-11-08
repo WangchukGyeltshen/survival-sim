@@ -30,7 +30,7 @@ if args.brain:
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     brain, info = load_brain(args.brain, device)
     brain.eval()
-    policy = BrainPolicy(brain, device)
+    policy = BrainPolicy(brain, device, temperament=info.get("temperament", True))
     print(f"Loaded brain from {args.brain} (trained for {info.get('update', '?')} rounds)")
 
 viewer = Viewer(make_sim(args.seed))
