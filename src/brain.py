@@ -18,6 +18,10 @@ MEMORY (added in Stage 3): a GRU, a small layer that keeps 128 numbers from one
       what to write, so an agent can remember things it can no longer see
       ("there was water behind that hill", "a wolf chased me from the east").
       Each agent has its own memory; a newborn starts with an empty one.
+TRIBE BRAINS (added in Stage 3): each tribe has its own copy of this brain,
+      trained only on its own members' experience, so tribes can develop
+      different habits ("cultures"). Children join their mother's tribe and
+      so use their tribe's brain.
 ACTOR: a score for each action. Each agent's behaviour genes then nudge the
       scores (src/temperament.py), and they are turned into chances (softmax).
 CRITIC: one number, its guess of how much future reward to expect.
@@ -29,7 +33,7 @@ import torch.nn as nn
 from torch.distributions import Categorical
 
 from src.observe import NUM_CHANNELS, NUM_SELF, VIEW_SIZE
-from src.agents import NUM_ACTIONS
+from src.agents import NUM_ACTIONS, NUM_TRIBES
 from src.temperament import shape_scores
 
 MEMORY = 128     # how many numbers each agent remembers between ticks
@@ -160,27 +164,91 @@ class MemoryBank:
         self.memory[torch.from_numpy(np.asarray(idx)).to(self.device)] = memory
 
 
+class TribeBrains(nn.Module):
+    """One brain per tribe (count=NUM_TRIBES), or one brain shared by everyone
+    (count=1). Tribe t uses brain t % count."""
+
+    def __init__(self, count=NUM_TRIBES, **sizes):
+        super().__init__()
+        self.count = count
+        self.brains = nn.ModuleList(Brain(**sizes) for _ in range(count))
+        self.sizes = self.brains[0].sizes
+        self.memory_size = self.brains[0].memory_size
+
+    def which(self, tribes):
+        """Which brain each agent uses."""
+        return np.asarray(tribes) % self.count
+
+    def groups(self, tribes, device):
+        """(brain number, rows as numpy, rows as torch) for each brain in use."""
+        which = self.which(tribes)
+        for b in np.unique(which):
+            rows = np.flatnonzero(which == b)
+            yield int(b), rows, torch.from_numpy(rows).to(device)
+
+    def empty_memory(self, n, device):
+        return self.brains[0].empty_memory(n, device)
+
+    @torch.no_grad()
+    def act(self, view, self_features, memory, temper, tribes, greedy=False):
+        """Like Brain.act, with each agent using its own tribe's brain."""
+        n, device = view.shape[0], view.device
+        actions = torch.zeros(n, dtype=torch.long, device=device)
+        logp = torch.zeros(n, device=device)
+        values = torch.zeros(n, device=device)
+        new_memory = torch.zeros_like(memory)
+        for b, _, r in self.groups(tribes, device):
+            t = temper[r] if temper is not None else None
+            actions[r], logp[r], values[r], new_memory[r] = self.brains[b].act(
+                view[r], self_features[r], memory[r], t, greedy)
+        return actions, logp, values, new_memory
+
+    @torch.no_grad()
+    def value(self, view, self_features, memory, tribes):
+        """Each agent's critic guess (used at the end of a round)."""
+        values = torch.zeros(view.shape[0], device=view.device)
+        for b, _, r in self.groups(tribes, view.device):
+            values[r] = self.brains[b](view[r], self_features[r], memory[r])[1]
+        return values
+
+
 def count_weights(model):
     return sum(p.numel() for p in model.parameters())
 
 
-def save_brain(brain, path, extra=None):
-    torch.save({"weights": brain.state_dict(), "sizes": brain.sizes, "extra": extra or {}}, path)
+def save_brains(brains, path, extra=None, optimizers=None):
+    data = {"brains": [b.state_dict() for b in brains.brains], "sizes": brains.sizes, "extra": extra or {}}
+    if optimizers is not None:
+        data["optimizers"] = [o.state_dict() for o in optimizers]
+    torch.save(data, path)
 
 
-def load_weights(brain, data, path=""):
-    """Put saved weights into a brain, with a clear message if they don't fit."""
+def saved_weights(data):
+    """The list of brains in a saved file (an older file holds one shared brain)."""
+    return data["brains"] if "brains" in data else [data["weights"]]
+
+
+def load_into(brains, data, path=""):
+    """Put saved weights into TribeBrains, with a clear message if they don't fit.
+    A file with one shared brain is copied into every tribe's brain (a split).
+    Returns True if a split happened."""
+    saved = saved_weights(data)
+    if len(saved) not in (1, brains.count):
+        raise SystemExit(f"{path} holds {len(saved)} brains but {brains.count} are needed")
     try:
-        brain.load_state_dict(data["weights"])
+        for k, brain in enumerate(brains.brains):
+            brain.load_state_dict(saved[k % len(saved)])
     except RuntimeError:
         raise SystemExit(
             f"The brain in {path} was made for an older version of the world (different senses,\n"
             f"actions or memory). Upgrade it first with brain surgery, for example:\n"
             f"    python surgery.py {path or 'runs/run1/latest.pt'} --name run2")
+    return len(saved) < brains.count
 
 
 def load_brain(path, device="cpu"):
+    """Load a saved brain file as TribeBrains (as many brains as it holds)."""
     data = torch.load(path, map_location=device, weights_only=False)
-    brain = Brain().to(device)
-    load_weights(brain, data, path)
-    return brain, data.get("extra", {})
+    brains = TribeBrains(count=len(saved_weights(data))).to(device)
+    load_into(brains, data, path)
+    return brains, data.get("extra", {})

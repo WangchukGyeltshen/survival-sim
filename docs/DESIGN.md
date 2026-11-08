@@ -164,13 +164,11 @@ Wolves and bears can be hunted, but it is very hard; groups and better weapons h
 - **Self:** body stats, pain, sickness, pregnancy, age, sex, everything carried, weapon and tools, body genes, time of day, season, storm, last action, blueprint, direction faced, calls heard, tribe, behaviour genes (99 numbers)
 
 ## Learning
-1. **Shared learning (culture):** agents learn with PPO (an actor-critic method); every agent's experience trains the brain.
+1. **Tribe learning (culture):** agents learn with PPO (an actor-critic method). Each tribe has **its own brain** (Stage 3), trained only on its own members' experience with its own optimizer, so tribes can develop different habits. Children join their mother's tribe and use its brain. Resuming a run saved with one shared brain splits it: all 4 tribe brains start as copies and then grow apart. `train.py --brains 1` starts a run with one brain shared by everyone (for comparison).
 2. **Evolution (genes):** inherited genes shape bodies and, through behaviour genes, temperament. Evolution favours whatever temperament survives and breeds best; the shared brain learns how to make the most of each one.
 
 3. **Memory (Stage 3):** a GRU layer keeps 128 numbers per agent from one tick to the next, so an agent can remember what it can no longer see. A newborn starts with an empty memory. While learning, decisions are replayed in 16-tick stretches of one agent's life, so the brain learns what was worth remembering.
 4. **Brain surgery (Stage 3):** when the world gains senses or actions, `surgery.py` grows the old brain into the new shape. Old weights are copied; new senses start ignored (zero weights); new actions start with a small share of the chances (10% in total); the memory starts ignored. A check confirms the grown brain chooses exactly like the old one. run2 started from run1 this way. A run can also be upgraded **in place** (same run, round count kept, old brain backed up), which is the normal step of the long-term plan.
-
-Still planned for Stage 3: **one brain per tribe**, so each tribe can develop its own culture.
 
 ## Measurements
 - Training: survival, reward, curiosity, births, causes of death (`analyze.py runs/<name>`)
@@ -182,7 +180,7 @@ Still planned for Stage 3: **one brain per tribe**, so each tribe can develop it
 3. Learning: senses, rewards, brain, PPO trainer (done)
 4. Stage 1 tools: history runs, replays, charts, family trees, heatmaps (done)
 5. Stage 2: the bigger world: resources and metal ages, fire, building, disease, migration, sharing, calls, tribes, parenting (done)
-6. **Stage 3: the bigger brain:** memory, brain surgery, behaviour genes (done); tribe brains (in progress)
+6. Stage 3: the bigger brain: memory, brain surgery, behaviour genes, tribe brains (done)
 7. Stage 4: faster training (several worlds at once) and comparison experiments
 8. Keep adding realism while training continues
 9. Final experiment: big world with continents

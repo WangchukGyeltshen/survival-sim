@@ -1,9 +1,14 @@
-"""Train the shared brain with PPO, and (optionally) watch it learn live.
+"""Train the tribe brains with PPO, and (optionally) watch them learn live.
 
-    python train.py                  train a new brain, with the live window
-    python train.py --resume         carry on from the last saved brain
+    python train.py                  train new brains, with the live window
+    python train.py --resume         carry on from the last saved brains
     python train.py --no-watch       train without the window (fastest)
     python train.py --name run2      keep a separate experiment in runs/run2
+    python train.py --brains 1       a new run with ONE brain shared by all tribes
+
+Each tribe has its own brain (Stage 3), trained only on its own members'
+experience. Resuming a run saved with one shared brain splits it: every
+tribe's brain starts as a copy of it, and from then on they grow apart.
 
 In the window: T = turbo (stop drawing, train at full speed), SPACE = pause,
 +/- = slow down / speed up (MAX = as fast as possible). Closing the window
@@ -20,7 +25,8 @@ HOW ONE ROUND OF LEARNING WORKS
    guesses get more accurate. PPO's rule: never change too much at once.
    Because agents have MEMORY, decisions are studied in short stretches of one
    agent's life (SEQ_LEN ticks in a row), so the brain can learn what was
-   worth remembering a few ticks earlier.
+   worth remembering a few ticks earlier. Each tribe's brain learns only from
+   its own tribe's decisions, with its own optimizer.
 4. Save the brain, write a line to the log, and start the next round.
 """
 
@@ -35,10 +41,10 @@ import torch
 
 from src.simulation import Simulation
 from src.observe import observe
-from src.brain import Brain, MemoryBank, save_brain, load_weights
+from src.brain import TribeBrains, MemoryBank, save_brains, load_into
 from src.rewards import compute_rewards
 from src.temperament import temperament
-from src.agents import NUM_ACTIONS, OLD_AGE, DEATH_CAUSES
+from src.agents import NUM_ACTIONS, OLD_AGE, DEATH_CAUSES, NUM_TRIBES
 from src.world import TICKS_PER_DAY
 
 # ---------------- settings ----------------
@@ -70,20 +76,32 @@ class Trainer:
         self.device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
         self.folder = os.path.join("runs", args.name)
         os.makedirs(self.folder, exist_ok=True)
-        self.brain = Brain().to(self.device)
-        self.optimizer = torch.optim.Adam(self.brain.parameters(), lr=LEARNING_RATE, eps=1e-5)
+        latest = os.path.join(self.folder, "latest.pt")
+        data = None
+        count = getattr(args, "brains", None) or NUM_TRIBES
+        if args.resume and os.path.exists(latest):
+            data = torch.load(latest, map_location=self.device, weights_only=False)
+            if "brains" in data:
+                count = len(data["brains"])          # keep however many brains the run has
+        self.brain = TribeBrains(count).to(self.device)
+        self.optimizers = [torch.optim.Adam(b.parameters(), lr=LEARNING_RATE, eps=1e-5)
+                           for b in self.brain.brains]
         self.parent = None
         self.surgeries = []
         self.update = 0
         self.total_ticks = 0
         self.total_samples = 0
         self.worlds = 1
-        latest = os.path.join(self.folder, "latest.pt")
-        if args.resume and os.path.exists(latest):
-            data = torch.load(latest, map_location=self.device, weights_only=False)
-            load_weights(self.brain, data, latest)
-            if "optimizer" in data:          # a brain fresh from surgery has none yet
-                self.optimizer.load_state_dict(data["optimizer"])
+        if data is not None:
+            split = load_into(self.brain, data, latest)
+            if "optimizers" in data:
+                for opt, state in zip(self.optimizers, data["optimizers"]):
+                    opt.load_state_dict(state)
+            elif "optimizer" in data:          # one shared brain's optimizer: every copy gets it
+                for opt in self.optimizers:
+                    opt.load_state_dict(data["optimizer"])
+            if split:
+                print(f"Split the shared brain into {count} tribe brains (each starts as a copy)")
             extra = data.get("extra", {})
             self.update = extra.get("update", 0)
             self.total_ticks = extra.get("total_ticks", 0)
@@ -142,7 +160,8 @@ class Trainer:
         life = np.mean(self.recent_life[-300:]) if self.recent_life else 0
         lines = [f"TRAINING  round {self.update}",
                  f"world #{self.worlds}   ticks trained {self.total_ticks:,}",
-                 f"avg days survived (recent): {life:.2f}"]
+                 f"avg days survived (recent): {life:.2f}",
+                 f"brains: {self.brain.count}" + (" (one per tribe)" if self.brain.count > 1 else " (shared)")]
         if stats:
             lines += [f"reward per agent per day: {stats['reward_per_day']:.2f}",
                       f"curiosity (entropy): {stats['curiosity']:.0%}",
@@ -168,8 +187,9 @@ class Trainer:
             feats_t = torch.from_numpy(feats).to(self.device)
             memory = self.bank.get(a, idx)
             temper = temperament(a, idx)                         # inborn leanings (behaviour genes)
+            tribes = a.tribe[idx].copy()                         # each uses its own tribe's brain
             acts, logp, values, new_memory = brain.act(view_t, feats_t, memory,
-                                                       torch.from_numpy(temper).to(self.device))
+                                                       torch.from_numpy(temper).to(self.device), tribes)
             self.bank.set(idx, new_memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()
@@ -186,6 +206,7 @@ class Trainer:
                 "spawn": a.spawn_tick[idx].astype(np.int64),     # tells apart people who shared a slot
                 "memory": memory.cpu().numpy(),                  # what they remembered before deciding
                 "temper": temper,
+                "brain": brain.which(tribes),
                 "view": (view * 255).astype(np.uint8),     # stored small to save memory
                 "feats": feats,
                 "actions": actions[idx],
@@ -210,8 +231,8 @@ class Trainer:
         if len(idx):
             view, feats = observe(sim, idx)
             with torch.no_grad():
-                _, v, _ = brain(torch.from_numpy(view).to(self.device), torch.from_numpy(feats).to(self.device),
-                                self.bank.get(sim.agents, idx))
+                v = brain.value(torch.from_numpy(view).to(self.device), torch.from_numpy(feats).to(self.device),
+                                self.bank.get(sim.agents, idx), sim.agents.tribe[idx])
             bootstrap[idx] = v.cpu().numpy()
         self.total_ticks += len(steps)
         self.total_samples += samples
@@ -246,19 +267,32 @@ class Trainer:
         actions, old_logp = cat("actions"), cat("logp")
         adv, returns = cat("adv"), cat("returns")
         memory, slot, spawn, temper = cat("memory"), cat("idx"), cat("spawn"), cat("temper")
-        # Scale advantages to an average of 0 and spread of 1 (makes learning steadier)
-        adv = ((adv - adv.mean()) / (adv.std() + 1e-8)).astype(np.float32)
+        which = cat("brain")
+        # Scale each brain's advantages to an average of 0 and spread of 1 (steadier learning)
+        adv = adv.astype(np.float32)
+        for b in np.unique(which):
+            rows = which == b
+            adv[rows] = (adv[rows] - adv[rows].mean()) / (adv[rows].std() + 1e-8)
         layout = self.stretches(slot, spawn)
         start_memory = memory[layout[:, 0]]
+        stretch_brain = which[layout[:, 0]]          # a whole life uses one brain
         per_minibatch = MINIBATCH // SEQ_LEN
         totals = Counter()
         updates = 0
         for _ in range(EPOCHS):
-            order = np.random.permutation(len(layout))
-            for start in range(0, len(layout), per_minibatch):
-                chosen = order[start:start + per_minibatch]
-                if len(chosen) < per_minibatch // 4:
-                    continue   # skip a tiny leftover group
+            # Each brain's stretches, shuffled and cut into groups; then the groups
+            # of all brains are mixed so every brain learns a little at a time
+            groups = []
+            for b in np.unique(stretch_brain):
+                mine = np.random.permutation(np.flatnonzero(stretch_brain == b))
+                for start in range(0, len(mine), per_minibatch):
+                    chosen = mine[start:start + per_minibatch]
+                    if len(chosen) < per_minibatch // 4 and start > 0:
+                        continue   # skip a tiny leftover group
+                    groups.append((int(b), chosen))
+            for k in np.random.permutation(len(groups)):
+                b, chosen = groups[k]
+                brain, optimizer = self.brain.brains[b], self.optimizers[b]
                 lay = layout[chosen]
                 filled = lay >= 0
                 mb = lay[filled]                                  # the decisions in this group
@@ -274,7 +308,7 @@ class Trainer:
                 lay_t = torch.from_numpy(local).to(self.device)
                 t_t = torch.from_numpy(temper[mb]).to(self.device)
 
-                new_logp, entropy, value = self.brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t, t_t)
+                new_logp, entropy, value = brain.evaluate_sequences(v_t, f_t, a_t, m_t, lay_t, t_t)
                 # How much more (or less) likely is this action now than when it was taken?
                 ratio = torch.exp(new_logp - old_t)
                 # PPO: follow the advantage, but don't let the ratio move past 1 +/- CLIP
@@ -284,10 +318,10 @@ class Trainer:
                 entropy_mean = entropy.mean()
                 loss = policy_loss + VALUE_WEIGHT * value_loss - ENTROPY_BONUS * entropy_mean
 
-                self.optimizer.zero_grad()
+                optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(self.brain.parameters(), MAX_GRAD)
-                self.optimizer.step()
+                torch.nn.utils.clip_grad_norm_(brain.parameters(), MAX_GRAD)
+                optimizer.step()
 
                 totals["policy_loss"] += policy_loss.item()
                 totals["value_loss"] += value_loss.item()
@@ -321,11 +355,9 @@ class Trainer:
         extra = {"update": self.update, "total_ticks": self.total_ticks,
                  "total_samples": self.total_samples, "worlds": self.worlds, "parent": self.parent,
                  "surgeries": self.surgeries}
-        data = {"weights": self.brain.state_dict(), "sizes": self.brain.sizes,
-                "optimizer": self.optimizer.state_dict(), "extra": extra}
-        torch.save(data, os.path.join(self.folder, "latest.pt"))
+        save_brains(self.brain, os.path.join(self.folder, "latest.pt"), extra, self.optimizers)
         if self.update % SNAPSHOT_EVERY == 0:
-            save_brain(self.brain, os.path.join(self.folder, f"brain_round{self.update:05d}.pt"), extra)
+            save_brains(self.brain, os.path.join(self.folder, f"brain_round{self.update:05d}.pt"), extra)
 
     def log(self, stats, learn_stats, seconds):
         life = np.mean(self.recent_life[-300:]) if self.recent_life else 0
@@ -399,4 +431,6 @@ if __name__ == "__main__":
     parser.add_argument("--resume", action="store_true", help="continue from runs/<name>/latest.pt")
     parser.add_argument("--no-watch", action="store_true", help="train without the window")
     parser.add_argument("--cpu", action="store_true", help="don't use the GPU")
+    parser.add_argument("--brains", type=int, choices=[1, NUM_TRIBES], default=None,
+                        help=f"new runs only: {NUM_TRIBES} = one brain per tribe (default), 1 = one shared brain")
     Trainer(parser.parse_args()).run()

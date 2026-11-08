@@ -14,6 +14,8 @@ def to_tensors(view, self_feats, device):
 
 
 class BrainPolicy:
+    """brain: TribeBrains (each agent uses its own tribe's brain)."""
+
     def __init__(self, brain, device):
         self.brain = brain
         self.device = device
@@ -30,7 +32,8 @@ class BrainPolicy:
             view, feats = observe(sim, idx)
             memory = self.bank.get(sim.agents, idx)
             temper = torch.from_numpy(temperament(sim.agents, idx)).to(self.device)
-            acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory, temper)
+            acts, _, _, memory = self.brain.act(*to_tensors(view, feats, self.device), memory, temper,
+                                                sim.agents.tribe[idx])
             self.bank.set(idx, memory)
             actions[idx] = acts.cpu().numpy()
         return actions

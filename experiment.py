@@ -26,7 +26,7 @@ from src.simulation import Simulation
 from src.observe import observe
 from src.recorder import Recorder
 from src.agents import NUM_ACTIONS
-from src.brain import load_weights
+from src.brain import TribeBrains, load_into, saved_weights
 from src.temperament import temperament
 
 
@@ -41,8 +41,12 @@ class HistoryRun(train.Trainer):
         self.folder_out = os.path.join("experiments", args.name)
         if args.brain and not args.blank:
             data = torch.load(args.brain, map_location=self.device, weights_only=False)
-            load_weights(self.brain, data, args.brain)
-            print(f"Loaded brain: {args.brain}")
+            count = len(saved_weights(data))       # one brain per tribe, or one shared brain
+            self.brain = TribeBrains(count).to(self.device)
+            self.optimizers = [torch.optim.Adam(b.parameters(), lr=train.LEARNING_RATE, eps=1e-5)
+                               for b in self.brain.brains]
+            load_into(self.brain, data, args.brain)
+            print(f"Loaded brain: {args.brain} ({count} brain{'s' if count > 1 else ''})")
         elif not args.blank:
             raise SystemExit("Give a brain with --brain runs/run2/latest.pt, or use --blank for an untrained one")
         else:
@@ -91,7 +95,8 @@ class HistoryRun(train.Trainer):
             memory = self.bank.get(a, idx)
             temper = torch.from_numpy(temperament(a, idx)).to(self.device)
             acts, _, _, memory = self.brain.act(torch.from_numpy(view).to(self.device),
-                                                torch.from_numpy(feats).to(self.device), memory, temper)
+                                                torch.from_numpy(feats).to(self.device), memory, temper,
+                                                a.tribe[idx])
             self.bank.set(idx, memory)
             actions = np.zeros(a.count, dtype=np.int64)
             actions[idx] = acts.cpu().numpy()

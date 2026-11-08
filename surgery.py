@@ -23,6 +23,8 @@ lists), the old brain no longer fits. Surgery builds a new, bigger brain and:
 
 Then it checks the result: on the same situations, the new brain must choose
 between the old actions exactly as the old brain did.
+
+A file with one brain per tribe has every tribe's brain grown the same way.
 """
 
 import argparse
@@ -33,7 +35,7 @@ import torch
 
 from src.simulation import Simulation
 from src.observe import observe
-from src.brain import Brain, MemoryBank, save_brain
+from src.brain import Brain, saved_weights
 
 
 def old_sizes(weights):
@@ -139,40 +141,48 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     data = torch.load(args.old, map_location=device, weights_only=False)
-    weights = data["weights"]
-    sizes = data.get("sizes") or old_sizes(weights)
-    old_brain = Brain(**sizes).to(device)
-    old_brain.load_state_dict(weights)
-    new = Brain().to(device)
+    all_weights = saved_weights(data)            # one brain, or one per tribe
+    sizes = data.get("sizes") or old_sizes(all_weights[0])
+    template = Brain().to(device)
     for key in ("channels", "self_size", "actions", "memory"):
-        if new.sizes[key] < sizes[key]:
+        if template.sizes[key] < sizes[key]:
             raise SystemExit(f"The new brain has fewer {key} than the old one; surgery can only grow a brain")
-    if new.sizes["hidden"] != sizes["hidden"]:
+    if template.sizes["hidden"] != sizes["hidden"]:
         raise SystemExit("The thinking layers changed size; surgery can't handle that")
-    if sizes["memory"] and new.sizes["memory"] != sizes["memory"]:
+    if sizes["memory"] and template.sizes["memory"] != sizes["memory"]:
         raise SystemExit("The memory changed size; surgery can't handle that yet")
 
     old_extra = data.get("extra", {})
     rounds = int(old_extra.get("update", 0))
-    if all(new.sizes[k] == sizes[k] for k in sizes):
+    if all(template.sizes[k] == sizes[k] for k in sizes):
         raise SystemExit("This brain already fits the current world; no surgery needed")
-    print(f"Old brain: {args.old} (round {rounds})")
+    count = len(all_weights)
+    print(f"Old brain: {args.old} (round {rounds}, {count} brain{'s' if count > 1 else ''})")
     for key in ("channels", "self_size", "actions", "memory"):
-        print(f"  {key:10s} {sizes[key]:4d} -> {new.sizes[key]:4d}")
-    notes = grow(weights, old_brain, new)
-    print("\n".join(notes))
+        print(f"  {key:10s} {sizes[key]:4d} -> {template.sizes[key]:4d}")
 
-    print("Checking on situations from a fresh world...")
-    views, feats = sample_situations(old_brain, sizes, args.seed, device)
-    if new.sizes["actions"] > sizes["actions"]:
-        got = set_new_actions(new, sizes["actions"], views, feats, args.new_share)
-        print(f"  new actions get {got:.1%} of the chances in total at first")
-    diff_probs, diff_values = check(old_brain, new, sizes, views, feats)
-    print(f"  {len(views)} situations: biggest difference from the old brain: "
-          f"chances {diff_probs:.2e}, value {diff_values:.2e}")
-    if diff_probs > 1e-4 or diff_values > 1e-3:
-        raise SystemExit("Surgery check failed: the new brain doesn't behave like the old one")
-    print("  OK: the grown brain behaves exactly like the old one")
+    grown = []
+    views = feats = None
+    for k, weights in enumerate(all_weights):
+        old_brain = Brain(**sizes).to(device)
+        old_brain.load_state_dict(weights)
+        new = Brain().to(device)
+        notes = grow(weights, old_brain, new)
+        if k == 0:
+            print("\n".join(notes))
+            print("Checking on situations from a fresh world...")
+            views, feats = sample_situations(old_brain, sizes, args.seed, device)
+        label = f"  brain {k + 1}:" if count > 1 else " "
+        if new.sizes["actions"] > sizes["actions"]:
+            got = set_new_actions(new, sizes["actions"], views, feats, args.new_share)
+            print(f"{label} new actions get {got:.1%} of the chances in total at first")
+        diff_probs, diff_values = check(old_brain, new, sizes, views, feats)
+        print(f"{label} {len(views)} situations: biggest difference from the old brain: "
+              f"chances {diff_probs:.2e}, value {diff_values:.2e}")
+        if diff_probs > 1e-4 or diff_values > 1e-3:
+            raise SystemExit("Surgery check failed: the new brain doesn't behave like the old one")
+        grown.append(new)
+    print("  OK: the grown brain" + ("s behave" if count > 1 else " behaves") + " exactly like the old one")
 
     os.makedirs(out_folder, exist_ok=True)
     if in_place:
@@ -185,8 +195,20 @@ def main():
     else:
         extra = {"update": 0, "total_ticks": 0, "total_samples": 0, "worlds": 1,
                  "parent": f"{args.old} round {rounds}"}
-        save_brain(new, os.path.join(out_folder, "brain_round00000.pt"), extra)
-    save_brain(new, out_path, extra)
+
+    def save(path):
+        # Keep the file's layout: one shared brain stays one (training splits it
+        # into tribe brains when resumed); tribe brains stay tribe brains
+        out = {"sizes": template.sizes, "extra": extra}
+        if "brains" in data:
+            out["brains"] = [b.state_dict() for b in grown]
+        else:
+            out["weights"] = grown[0].state_dict()
+        torch.save(out, path)
+
+    if not in_place:
+        save(os.path.join(out_folder, "brain_round00000.pt"))
+    save(out_path)
     print(f"Saved the grown brain to {out_path}")
     print(f"Next:  python train.py --name {args.name} --resume")
 
