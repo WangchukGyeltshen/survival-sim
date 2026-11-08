@@ -224,6 +224,8 @@ class Viewer:
         self.world = world = sim.world
         self.selected = None
         self.following = False
+        self.hit_marks = []      # a new world starts with a clean slate
+        self.heart_marks = []
         # Pick a random look for each tile once, so the map doesn't flicker
         self.variants = np.random.default_rng(0).integers(0, 10, (world.size, world.size))
         self.minimap = None
@@ -446,8 +448,6 @@ class Viewer:
 
         # Red slashes where hits landed (they last a few ticks of game time)
         now = self.world.tick
-        self.hit_marks = [m for m in self.hit_marks if now - m[2] < HIT_TICKS]
-        self.heart_marks = [m for m in self.heart_marks if now - m[2] < HEART_TICKS]
         width = max(2, tile // 10)
         for x, y, t in self.hit_marks:
             px, py = self.to_screen(x, y)
@@ -982,6 +982,10 @@ class Viewer:
     def after_tick(self):
         """Collect marks and log lines from the tick that just happened."""
         tick = self.world.tick
+        # Throw away old marks every tick (not only when drawing), so they can't
+        # pile up while the screen isn't being drawn (turbo mode)
+        self.hit_marks = [m for m in self.hit_marks if 0 <= tick - m[2] < HIT_TICKS]
+        self.heart_marks = [m for m in self.heart_marks if 0 <= tick - m[2] < HEART_TICKS]
         self.hit_marks += [(x, y, tick) for x, y in self.sim.agents.hits]
         self.heart_marks += [(x, y, tick) for x, y in self.sim.agents.hearts]
         self.collect_log()
