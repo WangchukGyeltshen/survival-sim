@@ -15,7 +15,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from src.world import GRASS, FOREST, TICKS_PER_DAY, DAYS_PER_YEAR
+from src.world import (GRASS, FOREST, TICKS_PER_DAY, DAYS_PER_YEAR, BRIDGE, HUT, CAMPFIRE,
+                       BLOCKS_ANIMALS)
 from src.agents import ANIMAL_WALKABLE, KILLED_BY_WOLF, KILLED_BY_BEAR, KICKED_BY_DEER
 
 RABBIT = 0
@@ -71,6 +72,8 @@ WOLF_DAY_ATTACKS_PEOPLE = 30   # in daytime, only attack people when this hungry
 BEAR_HOME_RADIUS = 6      # bears wander this far from home
 BEAR_ANGER_RANGE = 2      # bears charge people this close
 BEAR_BERRY_FOOD = 15
+FIRE_FEAR_RANGE = 3       # wolves and bears won't come this close to a campfire
+DEER_MIGRATION = 0.25     # chance per calm tick that a deer heads toward its season's grazing
 MEAT_PIECE = 10           # one piece of meat an agent carries = 10 food points of the animal
 DEER_KICK_CHANCE = 0.4    # a hurt deer may kick back
 DEER_KICK = 8
@@ -92,6 +95,8 @@ class Animals:
         self.home_x = np.zeros(n, dtype=np.int32)     # bears: home spot
         self.home_y = np.zeros(n, dtype=np.int32)
         self.next_pack = 0
+        self.fire_zone = None      # tiles near a campfire (predators keep away)
+        self.fearing_fire = False
         self.pack_target = {}   # pack id -> (x, y) the pack is roaming toward
         self.killed = {name: 0 for name in SPECIES_NAMES}   # deaths by being eaten
 
@@ -136,7 +141,12 @@ class Animals:
     def walkable(self, x, y):
         size = self.world.size
         w = self.world
-        return (0 <= x < size and 0 <= y < size and ANIMAL_WALKABLE[w.terrain[y, x]]
+        if not (0 <= x < size and 0 <= y < size):
+            return False
+        structure = w.structure[y, x]
+        if self.fearing_fire and self.fire_zone is not None and self.fire_zone[y, x]:
+            return False
+        return ((ANIMAL_WALKABLE[w.terrain[y, x]] or structure == BRIDGE) and not BLOCKS_ANIMALS[structure]
                 and w.fire[y, x] == 0 and w.flood[y, x] == 0)
 
     def move_toward(self, i, tx, ty):
@@ -212,8 +222,28 @@ class Animals:
         night = world.is_night
         winter = world.season == "winter"
 
+        # Tiles close to a campfire: predators won't go there or attack anyone there
+        fires = world.structure == CAMPFIRE
+        if fires.any():
+            zone = fires.copy()
+            for _ in range(FIRE_FEAR_RANGE):
+                grown = zone.copy()
+                grown[1:, :] |= zone[:-1, :]
+                grown[:-1, :] |= zone[1:, :]
+                grown[:, 1:] |= zone[:, :-1]
+                grown[:, :-1] |= zone[:, 1:]
+                zone = grown
+            self.fire_zone = zone
+        else:
+            self.fire_zone = None
+
         people = np.flatnonzero(agents.alive & (agents.health > 0))
         px, py = agents.x[people], agents.y[people]
+        # People that predators can reach: not inside a hut, not by a campfire
+        safe = world.structure[agents.y[people], agents.x[people]] == HUT
+        if self.fire_zone is not None:
+            safe |= self.fire_zone[agents.y[people], agents.x[people]]
+        self.reachable_people = people[~safe]
         # Positions of predators, worked out once per tick (used by prey)
         hunters = np.flatnonzero(self.alive & np.isin(self.species, (WOLF, BEAR)))
         self.danger_x = np.concatenate([px, self.x[hunters]])
@@ -234,10 +264,13 @@ class Animals:
             if self.rng.random() < speed:
                 if kind in (RABBIT, DEER):
                     self.act_prey(i, sp, px, py, winter)
-                elif kind == WOLF:
-                    self.act_wolf(i, sp, agents, people, night)
                 else:
-                    self.act_bear(i, sp, agents, people)
+                    self.fearing_fire = True
+                    if kind == WOLF:
+                        self.act_wolf(i, sp, agents, self.reachable_people, night)
+                    else:
+                        self.act_bear(i, sp, agents, self.reachable_people)
+                    self.fearing_fire = False
 
         self.live_and_breed()
 
@@ -251,6 +284,14 @@ class Animals:
         # Calm: graze, and wander now and then
         if self.world.terrain[self.y[i], self.x[i]] in (GRASS, FOREST):
             self.food[i] += GRAZE_FOOD * (0.4 if winter else 1)
+        if self.species[i] == DEER and self.rng.random() < DEER_MIGRATION:
+            # Herds drift north in summer and south in winter
+            size = self.world.size
+            band = {"summer": 0.2, "winter": 0.8}.get(self.world.season, 0.5)
+            target_y = int(band * size)
+            if abs(self.y[i] - target_y) > size // 8:
+                self.move_toward(i, self.x[i], target_y)
+                return
         if self.rng.random() < 0.3:
             self.wander(i)
 

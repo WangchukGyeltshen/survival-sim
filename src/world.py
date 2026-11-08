@@ -43,6 +43,29 @@ WATER_REACH = 3          # tiles from water that count as "watered"
 CROP_YIELD = 6           # servings on a ripe crop tile
 PILE_TICKS = 5 * TICKS_PER_DAY   # dropped things rot or blow away after 5 days
 
+# ---------- resource deposits ----------
+NO_DEPOSIT, FLINT, CLAY, COPPER_ORE, TIN_ORE, IRON_ORE = 0, 1, 2, 3, 4, 5
+DEPOSIT_NAMES = ["", "flint", "clay", "copper ore", "tin ore", "iron ore"]
+# (chance per suitable tile, amount, regrows?)
+FLINT_SHARE, CLAY_SHARE = 0.25, 0.2          # of land tiles next to rock / next to water
+COPPER_SHARE, TIN_SHARE, IRON_SHARE = 0.12, 0.07, 0.08   # of mountain edge tiles
+DEPOSIT_AMOUNT = {FLINT: 3, CLAY: 4, COPPER_ORE: 6, TIN_ORE: 4, IRON_ORE: 8}
+DEPOSIT_REGROW = 5 * TICKS_PER_DAY            # flint and clay slowly build up again
+
+# ---------- structures (built by agents) ----------
+NO_STRUCTURE, CAMPFIRE, HUT, FENCE, WALL, STORAGE, BRIDGE, WELL, WATCHTOWER, FURNACE = range(10)
+STRUCTURE_NAMES = ["", "campfire", "hut", "wooden fence", "stone wall", "storage", "bridge",
+                   "well", "watchtower", "furnace"]
+STRUCTURE_LIFE = {CAMPFIRE: 3 * TICKS_PER_DAY, HUT: 30 * TICKS_PER_DAY, FENCE: 20 * TICKS_PER_DAY,
+                  WALL: 100 * TICKS_PER_DAY, STORAGE: 30 * TICKS_PER_DAY, BRIDGE: 40 * TICKS_PER_DAY,
+                  WELL: 100 * TICKS_PER_DAY, WATCHTOWER: 40 * TICKS_PER_DAY, FURNACE: 100 * TICKS_PER_DAY}
+CAMPFIRE_MAX_FUEL = 6 * TICKS_PER_DAY
+# Which structures people / animals cannot walk into
+BLOCKS_PEOPLE = np.zeros(10, dtype=bool)
+BLOCKS_PEOPLE[[CAMPFIRE, FENCE, WALL, WELL, FURNACE]] = True
+BLOCKS_ANIMALS = BLOCKS_PEOPLE.copy()
+BLOCKS_ANIMALS[HUT] = True
+
 
 def smooth_noise(size, rng, octaves=5, start_cells=4):
     """Random 'hilly' values between 0 and 1.
@@ -106,6 +129,14 @@ class World:
         # Things lying on the ground: {(x, y): {"meat": 3, "weapon": 2, ..., "tick": t}}
         self.piles = {}
 
+        # Structures built by agents, how long until each wears out, which tribe built it,
+        # and what is kept in each storage
+        self.structure = np.zeros(shape, dtype=np.int8)
+        self.structure_hp = np.zeros(shape, dtype=np.int32)
+        self.structure_tribe = np.full(shape, -1, dtype=np.int8)
+        self.storage = {}       # {(x, y): {"berries": 3, ...}}
+        self.worn_out = []      # structures that fell apart this tick
+
     # ---------- world generation ----------
     def _generate(self):
         self.elevation = smooth_noise(self.size, self.rng)
@@ -134,6 +165,7 @@ class World:
         forest = self.terrain == FOREST
         level = np.quantile(patches[forest], 1 - POISON_SHARE)
         self.poison = forest & (patches >= level)
+        self._place_deposits()
 
     def _neighbours(self, y, x):
         for dy, dx in ((1, 0), (-1, 0), (0, 1), (0, -1)):
@@ -192,11 +224,76 @@ class World:
         day_of_year = self.day % DAYS_PER_YEAR
         return ["spring", "summer", "autumn", "winter"][day_of_year * 4 // DAYS_PER_YEAR]
 
+    # ---------- resource deposits ----------
+    def _place_deposits(self):
+        size = self.size
+        self.deposit = np.zeros((size, size), dtype=np.int8)
+        self.deposit_amount = np.zeros((size, size), dtype=np.int16)
+        rock = self.terrain == ROCK
+        water = np.isin(self.terrain, (RIVER, POND, DEEP_WATER))
+        land = np.isin(self.terrain, (GRASS, FOREST))
+        near_rock, near_water, near_land = self._touching(rock), self._touching(water), self._touching(land)
+        roll = self.rng.random((size, size))
+        places = [
+            (FLINT, land & near_rock, FLINT_SHARE),
+            (CLAY, (self.terrain == GRASS) & near_water, CLAY_SHARE),
+            (COPPER_ORE, rock & near_land, COPPER_SHARE),
+            (TIN_ORE, rock & near_land, TIN_SHARE),
+            (IRON_ORE, rock & near_land, IRON_SHARE),
+        ]
+        start = 0.0
+        for kind, where, share in places:
+            # different slices of the same random roll, so deposits never overlap
+            chosen = where & (self.deposit == 0) & (roll >= start) & (roll < start + share)
+            self.deposit[chosen] = kind
+            self.deposit_amount[chosen] = DEPOSIT_AMOUNT[kind]
+            start += share
+        self.deposit_full = self.deposit_amount.copy()
+
+    def _touching(self, mask):
+        out = np.zeros_like(mask)
+        out[1:, :] |= mask[:-1, :]
+        out[:-1, :] |= mask[1:, :]
+        out[:, 1:] |= mask[:, :-1]
+        out[:, :-1] |= mask[:, 1:]
+        return out
+
+    # ---------- structures ----------
+    def can_walk(self, x, y):
+        """Arrays: can people walk onto these tiles (terrain allowing)?"""
+        return ~BLOCKS_PEOPLE[self.structure[y, x]]
+
+    def remove_structure(self, x, y):
+        kind = int(self.structure[y, x])
+        if kind == STORAGE and (x, y) in self.storage:
+            self.drop(x, y, self.storage.pop((x, y)))
+        self.structure[y, x] = NO_STRUCTURE
+        self.structure_hp[y, x] = 0
+        self.structure_tribe[y, x] = -1
+        return kind
+
+    def _wear_structures(self):
+        built = self.structure > 0
+        if not built.any():
+            return
+        self.structure_hp[built] -= 1
+        # rain puts campfires out faster
+        if self.storm > 0:
+            self.structure_hp[self.structure == CAMPFIRE] -= 2
+        for y, x in np.argwhere(built & (self.structure_hp <= 0)):
+            self.remove_structure(int(x), int(y))
+            self.worn_out.append((int(x), int(y)))
+
     def step(self):
         """Advance the world by one tick."""
         self.tick += 1
         self._regrow_berries()
         self._grow_crops()
+        self.worn_out = []
+        self._wear_structures()
+        if self.tick % DEPOSIT_REGROW == 0:      # flint and clay build up again
+            renew = np.isin(self.deposit, (FLINT, CLAY)) & (self.deposit_amount < self.deposit_full)
+            self.deposit_amount[renew] += 1
         if self.tick % 50 == 0:
             self._clean_old_piles()
 
@@ -216,7 +313,7 @@ class World:
     def drop(self, x, y, items):
         pile = self.piles.setdefault((x, y), {})
         for item, n in items.items():
-            if item in ("weapon", "weapon_uses"):
+            if item in ("weapon", "weapon_uses", "pick", "sickle", "pot_water"):
                 if n > pile.get(item, 0) or item == "weapon_uses":
                     pile[item] = n
             else:

@@ -320,10 +320,14 @@ HEART = check([
 
 SKIN_TONES = [(244, 204, 166), (222, 168, 122), (176, 122, 84), (122, 82, 56)]
 HAIR_COLOURS = [(36, 28, 24), (84, 54, 32), (150, 76, 36), (214, 178, 100), (120, 120, 126)]
-CLOTHES = {   # tunic / dress colour and its shade
-    0: ((40, 110, 245), (26, 76, 190)),    # men: blue
-    1: ((235, 50, 80), (180, 30, 60)),     # women: red
-}
+# Each tribe wears its own colour (tunic colour and its shade). Men and women
+# are told apart by shape: men wear tunics and trousers, women long hair and dresses.
+TRIBE_NAMES = ["Blue", "Red", "Green", "Gold"]
+TRIBE_CLOTHES = [((40, 110, 245), (26, 76, 190)),
+                 ((230, 50, 70), (176, 30, 50)),
+                 ((60, 170, 80), (38, 124, 56)),
+                 ((236, 186, 40), (190, 140, 20))]
+TRIBE_COLOURS = [c for c, _ in TRIBE_CLOTHES]
 PEOPLE_FIXED = {"e": (30, 24, 24), "p": (70, 52, 40), "f": (44, 32, 24), "v": (110, 76, 40)}
 
 # ---------- animals ----------
@@ -440,16 +444,23 @@ def weapon_art(kind):
         for y, x in ((9, 13), (10, 12), (10, 13), (10, 14), (11, 13), (11, 14)):
             g[y][x] = "g"
         g[9][13] = "G"
-    else:              # spear: long shaft with a stone tip
+    elif kind == 4:    # flint blade: a dark, sharp leaf shape
+        for y, x in ((7, 13), (8, 13), (8, 14), (9, 13), (9, 14), (10, 13), (11, 13)):
+            g[y][x] = "f"
+        g[7][13] = "F"
+    else:              # spears: long shaft with a stone or metal tip
+        tip = {3: "g", 5: "c", 6: "b", 7: "i"}[kind]
         for y in range(3, 15):
             g[y][13] = "n" if y % 3 else "N"
         for y, x in ((0, 13), (1, 12), (1, 13), (1, 14), (2, 13)):
-            g[y][x] = "g"
+            g[y][x] = tip
         g[0][13] = "G"
     return rows(g)
 
 
-WEAPON_PALETTE = {"n": (150, 100, 50), "N": (110, 72, 36), "g": (200, 200, 210), "G": (250, 250, 255)}
+WEAPON_PALETTE = {"n": (150, 100, 50), "N": (110, 72, 36), "g": (200, 200, 210), "G": (250, 250, 255),
+                  "f": (70, 74, 96), "F": (150, 160, 190), "c": (214, 120, 60), "b": (226, 180, 70),
+                  "i": (170, 180, 196)}
 
 
 def crop_art(stage):
@@ -506,9 +517,15 @@ ICONS = {
     "plant": ["g...g", ".g.g.", "..g..", "..g..", ".nnn."],
     "craft": ["kkkk.", "kkkk.", "..n..", "..n..", "..n.."],
     "mate": [".r.r.", "rrrrr", "rrrrr", ".rrr.", "..r.."],
+    "give": ["..r..", ".rrr.", "..r..", "nnnnn", ".nnn."],
+    "build": ["kkkkk", "k.k.k", "kkkkk", "k.k.k", "kkkkk"],
+    "call 1": ["wwww.", "w..w.", "wwww.", ".w...", "....."],
+    "call 2": ["wwwww", "w.w.w", "wwwww", ".w...", "....."],
+    "call 3": ["wwwww", "wcwcw", "wwwww", ".w...", "....."],
+    "sick": [".ggg.", "g.g.g", "ggggg", "g.g.g", ".ggg."],
 }
 ICON_PALETTE = {"b": (80, 170, 255), "r": (240, 60, 90), "g": (90, 200, 80), "x": (255, 70, 50),
-                "w": (250, 250, 250), "n": (150, 100, 50), "k": (180, 180, 190)}
+                "w": (250, 250, 250), "n": (150, 100, 50), "k": (180, 180, 190), "c": (255, 200, 60)}
 
 
 # ======================================================================
@@ -612,26 +629,32 @@ def minimap_colour(kind, winter):
     return palette[MINIMAP_KEYS[kind]]
 
 
-def people_palette(sex, skin, hair):
-    tunic, shade = CLOTHES[sex]
+def people_palette(tribe, skin, hair):
+    tunic, shade = TRIBE_CLOTHES[tribe]
     pal = dict(PEOPLE_FIXED)
     pal.update({"s": SKIN_TONES[skin], "h": HAIR_COLOURS[hair], "t": tunic, "u": shade})
     return pal
 
 
+class PeopleSprites(dict):
+    """People images, made the first time each look is needed:
+    key = (sex, kind, skin, hair, tribe), kind = "adult", "child" or "pregnant"."""
+
+    def __init__(self, tile_px):
+        super().__init__()
+        self.tile_px = tile_px
+
+    def __missing__(self, key):
+        sex, kind, skin, hair, tribe = key
+        art = CHILD if kind == "child" else (PREGNANT if kind == "pregnant" else (MAN if sex == 0 else WOMAN))
+        image = build_outlined(art, people_palette(tribe, skin, hair), self.tile_px)
+        self[key] = image
+        return image
+
+
 def agent_sprites(tile_px):
-    """Returns ({(sex, kind, skin, hair): image}, bones, heart) for one zoom level.
-    kind is "adult", "child" or "pregnant"."""
-    people = {}
-    for sex in (0, 1):
-        adult = MAN if sex == 0 else WOMAN
-        for skin in range(len(SKIN_TONES)):
-            for hair in range(len(HAIR_COLOURS)):
-                pal = people_palette(sex, skin, hair)
-                people[(sex, "adult", skin, hair)] = build_outlined(adult, pal, tile_px)
-                people[(sex, "child", skin, hair)] = build_outlined(CHILD, pal, tile_px)
-                if sex == 1:
-                    people[(sex, "pregnant", skin, hair)] = build_outlined(PREGNANT, pal, tile_px)
+    """Returns (people images, bones, heart) for one zoom level."""
+    people = PeopleSprites(tile_px)
     bones = build_outlined(BONES, {"w": (232, 226, 210), "k": (40, 34, 34)}, tile_px)
     heart = build_outlined(HEART, {"r": (240, 80, 120), "R": (255, 190, 210)}, tile_px)
     return people, bones, heart
@@ -658,7 +681,7 @@ def farm_sprites(tile_px):
     """Crop overlays (young, growing, ripe), a pile image, and weapon overlays."""
     crops = [build_sprite(crop_art(stage), CROP_PALETTE, tile_px) for stage in range(3)]
     pile = build_outlined(PILE_ART, PILE_PALETTE, tile_px)
-    weapons = {k: build_outlined(weapon_art(k), WEAPON_PALETTE, tile_px) for k in (1, 2, 3)}
+    weapons = {k: build_outlined(weapon_art(k), WEAPON_PALETTE, tile_px) for k in range(1, 8)}
     return crops, pile, weapons
 
 
@@ -677,3 +700,233 @@ def icon_sprites(tile_px):
         small = to_surface(art, ICON_PALETTE, outline=True)
         out[name] = pygame.transform.scale(small, (7 * scale, 7 * scale))
     return out
+
+
+# ======================================================================
+# Stage 2: resource deposits and structures
+# ======================================================================
+def deposit_art(kind):
+    """Small marks drawn on top of a tile: flint and clay on the ground,
+    ores as coloured specks in the rock."""
+    rng = random.Random(70 + kind)
+    g = grid()
+    if kind == 1:                                 # flint: a few grey-blue nodules
+        for _ in range(3):
+            x, y = rng.randrange(2, 13), rng.randrange(3, 13)
+            for dx, dy in ((0, 0), (1, 0), (0, 1), (1, 1)):
+                g[y + dy][x + dx] = "f"
+            g[y][x] = "F"
+    elif kind == 2:                               # clay: reddish lumps
+        for _ in range(2):
+            x, y = rng.randrange(2, 11), rng.randrange(3, 12)
+            for dy in range(3):
+                for dx in range(4 - (dy == 2)):
+                    g[y + dy][x + dx] = "c"
+            g[y][x + 1] = "C"
+    else:                                         # ore specks in the rock
+        mark = {3: "o", 4: "t", 5: "i"}[kind]
+        for _ in range(9 if kind != 4 else 6):
+            x, y = rng.randrange(1, 15), rng.randrange(1, 15)
+            g[y][x] = mark
+            if rng.random() < 0.5:
+                g[y][min(x + 1, 15)] = mark.upper()
+    return rows(g)
+
+
+DEPOSIT_PALETTE = {"f": (110, 116, 140), "F": (200, 206, 224), "c": (178, 98, 64), "C": (214, 140, 100),
+                   "o": (60, 180, 140), "O": (140, 230, 190), "t": (210, 214, 224), "T": (250, 250, 255),
+                   "i": (170, 70, 44), "I": (220, 120, 80)}
+
+CAMPFIRE_ART = [check([
+    "................",
+    "................",
+    "................",
+    "................",
+    "................",
+    ".......y........",
+    "......yoy.......",
+    "......oro.y.....",
+    ".....yorro......",
+    ".....orrro......",
+    "....oorRroo.....",
+    "...bbbbbbbbb....",
+    "..bBbbBbbBbbb...",
+    "...bbbbbbbbb....",
+    "..kk.......kk...",
+    "................",
+], "campfire")]
+CAMPFIRE_ART.append(rows([[("." if c in "yo" and i < 7 else c) for c in r] for i, r in
+                          enumerate([list(r) for r in CAMPFIRE_ART[0]])]))
+HUT_ART = check([
+    "................",
+    ".......YY.......",
+    "......YyyY......",
+    ".....YyyyyY.....",
+    "....YyYyyYyY....",
+    "...YyyyyyyyyY...",
+    "..YyyYyyyYyyyY..",
+    ".YYYYYYYYYYYYYY.",
+    "..bwwwwwwwwwwb..",
+    "..bwwwwwwwwwwb..",
+    "..bwwwwKKwwwwb..",
+    "..bwwwKKKKwwwb..",
+    "..bwwwKKKKwwwb..",
+    "..bwwwKKKKwwwb..",
+    "..bbbbKKKKbbbb..",
+    "................",
+], "hut")
+FENCE_ART = check([
+    "................",
+    "................",
+    "................",
+    "..b....b....b...",
+    ".bBb..bBb..bBb..",
+    "bbbbbbbbbbbbbbbb",
+    "BBBBBBBBBBBBBBBB",
+    ".bBb..bBb..bBb..",
+    ".bBb..bBb..bBb..",
+    "bbbbbbbbbbbbbbbb",
+    "BBBBBBBBBBBBBBBB",
+    ".bBb..bBb..bBb..",
+    ".bBb..bBb..bBb..",
+    ".bBb..bBb..bBb..",
+    "................",
+    "................",
+], "fence")
+WALL_ART = check([
+    "................",
+    "rrrrrrrrrrrrrrrr",
+    "RRRkRRRRRkRRRRRk",
+    "RRRkRRRRRkRRRRRk",
+    "kkkkkkkkkkkkkkkk",
+    "RkRRRRRkRRRRRRkR",
+    "RkRRRRRkRRRRRRkR",
+    "kkkkkkkkkkkkkkkk",
+    "RRRRkRRRRRkRRRRR",
+    "RRRRkRRRRRkRRRRR",
+    "kkkkkkkkkkkkkkkk",
+    "RRkRRRRRRkRRRRkR",
+    "RRkRRRRRRkRRRRkR",
+    "kkkkkkkkkkkkkkkk",
+    "KKKKKKKKKKKKKKKK",
+    "................",
+], "wall")
+STORAGE_ART = check([
+    "................",
+    "................",
+    "................",
+    "................",
+    "...bbbbbbbbbb...",
+    "..bBBBBBBBBBBb..",
+    "..bbbbbbbbbbbb..",
+    "..bnnnnnnnnnnb..",
+    "..bnnnnyynnnnb..",
+    "..bnnnnyynnnnb..",
+    "..bnnnnnnnnnnb..",
+    "..bnnnnnnnnnnb..",
+    "..bbbbbbbbbbbb..",
+    "...B........B...",
+    "................",
+    "................",
+], "storage")
+BRIDGE_ART = check([
+    "................",
+    "BBBBBBBBBBBBBBBB",
+    "bbbbbbbbbbbbbbbb",
+    "nnnnnnnnnnnnnnnn",
+    "bBbbbBbbbbBbbbBb",
+    "nnnnnnnnnnnnnnnn",
+    "bbbBbbbbbBbbbbbb",
+    "nnnnnnnnnnnnnnnn",
+    "bbbbbbBbbbbbBbbb",
+    "nnnnnnnnnnnnnnnn",
+    "bBbbbbbbBbbbbbbB",
+    "nnnnnnnnnnnnnnnn",
+    "bbbbbbbbbbbbbbbb",
+    "BBBBBBBBBBBBBBBB",
+    "................",
+    "................",
+], "bridge")
+WELL_ART = check([
+    "................",
+    "..bbbbbbbbbbbb..",
+    "..b..........b..",
+    "..b....kk....b..",
+    "..b....k.....b..",
+    "..b....k.....b..",
+    "...rrrrrrrrrr...",
+    "..rRRRRRRRRRRr..",
+    "..RkWWWWWWWWkR..",
+    "..RkWwWWWwWWkR..",
+    "..RkWWWWWWWWkR..",
+    "..RRRRRRRRRRRR..",
+    "..RkRRkRRkRRkR..",
+    "..kkkkkkkkkkkk..",
+    "................",
+    "................",
+], "well")
+TOWER_ART = check([
+    "...YYYYYYYYYY...",
+    "..YyyyyyyyyyyY..",
+    "..bBBBBBBBBBBb..",
+    "..b.b......b.b..",
+    "..bbbbbbbbbbbb..",
+    "...b.b....b.b...",
+    "...b..b..b..b...",
+    "...b...bb...b...",
+    "...b...bb...b...",
+    "...b..b..b..b...",
+    "...b.b....b.b...",
+    "...bb......bb...",
+    "...b.b....b.b...",
+    "...b..b..b..b...",
+    "..RRR......RRR..",
+    "..kkk......kkk..",
+], "watchtower")
+FURNACE_ART = check([
+    "................",
+    "......kkkk......",
+    "......kRRk......",
+    "......kRRk......",
+    "....rrRRRRrr....",
+    "...rRRRRRRRRr...",
+    "..rRRRkkkkRRRr..",
+    "..RRRkooookRRR..",
+    "..RRkoyyyyokRR..",
+    "..RRkoyrryokRR..",
+    "..RRkoooooo kR..".replace(" ", "k"),
+    "..RRRRRRRRRRRR..",
+    "..RkRRkRRkRRkR..",
+    "..kkkkkkkkkkkk..",
+    "................",
+    "................",
+], "furnace")
+STRUCTURE_PALETTE = {
+    "y": (214, 186, 90), "Y": (170, 140, 60), "w": (196, 160, 110), "b": (130, 88, 48), "B": (92, 60, 32),
+    "n": (164, 116, 66), "K": (40, 30, 26), "k": (84, 84, 96), "r": (182, 182, 192), "R": (138, 138, 150),
+    "W": (58, 128, 212), "o": (255, 150, 40), "y2": (255, 236, 120), "r2": (232, 72, 30),
+}
+FLAME = {"y": (255, 236, 120), "o": (255, 160, 40), "r": (232, 72, 30), "R": (150, 30, 20),
+         "b": (120, 80, 44), "B": (84, 56, 30), "k": (90, 90, 100)}
+
+
+def structure_sprites(tile_px):
+    """{structure number: image}; the campfire is a list of 2 flickering frames."""
+    from src.world import CAMPFIRE, HUT, FENCE, WALL, STORAGE, BRIDGE, WELL, WATCHTOWER, FURNACE
+    furnace_pal = dict(STRUCTURE_PALETTE)
+    furnace_pal.update({"y": (255, 236, 120), "r": (232, 72, 30)})
+    return {
+        CAMPFIRE: [build_outlined(f, FLAME, tile_px) for f in CAMPFIRE_ART],
+        HUT: build_outlined(HUT_ART, STRUCTURE_PALETTE, tile_px),
+        FENCE: build_outlined(FENCE_ART, STRUCTURE_PALETTE, tile_px),
+        WALL: build_sprite(WALL_ART, STRUCTURE_PALETTE, tile_px),
+        STORAGE: build_outlined(STORAGE_ART, STRUCTURE_PALETTE, tile_px),
+        BRIDGE: build_sprite(BRIDGE_ART, STRUCTURE_PALETTE, tile_px),
+        WELL: build_outlined(WELL_ART, STRUCTURE_PALETTE, tile_px),
+        WATCHTOWER: build_outlined(TOWER_ART, STRUCTURE_PALETTE, tile_px),
+        FURNACE: build_outlined(FURNACE_ART, furnace_pal, tile_px),
+    }
+
+
+def deposit_sprites(tile_px):
+    return {kind: build_sprite(deposit_art(kind), DEPOSIT_PALETTE, tile_px) for kind in range(1, 6)}

@@ -34,10 +34,14 @@ import pygame
 from src.world import POND, FARMLAND, CROP_GROW_TICKS, TICKS_PER_DAY, DAYLIGHT_TICKS
 from src.sprites import (SpriteSheet, PIXELS, minimap_colour, agent_sprites, animal_sprites,
                          WOLF_EYE, disaster_sprites, farm_sprites, shadow_sprite, icon_sprites,
-                         outline_offset, SKIN_TONES, HAIR_COLOURS)
+                         outline_offset, SKIN_TONES, HAIR_COLOURS, structure_sprites,
+                         deposit_sprites, TRIBE_COLOURS, TRIBE_NAMES)
+from src.world import CAMPFIRE, STRUCTURE_NAMES, BLOCKS_PEOPLE, ROCK
+from src.tech import BLUEPRINTS, TOOL_NAMES
 from src.agents import (ITEMS, WEAPON_NAMES, HANDS, GENE_NAMES, ADULT_AGE, EAT, DRINK,
                         PICK_UP, PLANT, CRAFT, ATTACK_ANIMAL, ATTACK_PERSON, MATE,
-                        ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE)
+                        ACTION_NAMES, DEATH_CAUSES, TICKS_PER_YEAR, MALE, ALL_ITEMS,
+                        GIVE, BUILD, CALL_1, CALL_2, CALL_3)
 from src.observe import observe, CH, VIEW_SIZE, TERRAIN_ORDER
 from src.animals import RABBIT, DEER, WOLF, BEAR
 from src.simulation import Simulation
@@ -59,7 +63,8 @@ ICON_TICKS = 6                   # action icons stay up for this many ticks
 HIT_TICKS = 3                    # red hit slashes stay this many ticks
 HEART_TICKS = 12                 # hearts float up for this many ticks
 ICON_FOR_ACTION = {EAT: "eat", DRINK: "drink", PICK_UP: "pick up", PLANT: "plant", CRAFT: "craft",
-                   ATTACK_ANIMAL: "attack", ATTACK_PERSON: "attack", MATE: "mate"}
+                   ATTACK_ANIMAL: "attack", ATTACK_PERSON: "attack", MATE: "mate", GIVE: "give",
+                   BUILD: "build", CALL_1: "call 1", CALL_2: "call 2", CALL_3: "call 3"}
 SELECT_COLOUR = (255, 230, 90)
 BAR_COLOURS = {
     "health": (214, 60, 70),
@@ -112,6 +117,11 @@ CATEGORY = {
     "poisoned": "health", "got sick": "health",
     "attacked": "fights", "killed": "fights", "hunted": "fights", "hit animal": "fights",
     "crafted": "work", "planted": "work", "harvested": "work", "weapon broke": "work", "looted": "work",
+    "mined": "work",
+    "built": "building", "repaired": "building", "fed fire": "building", "destroyed": "building",
+    "gave": "sharing", "stored": "sharing", "took from storage": "sharing",
+    "called": "calls",
+    "caught sickness": "health", "fell ill": "health",
     "disaster": "disasters", "discovery": "discoveries",
     "ate": "food", "drank": "food",
     "picked up": "items",
@@ -122,10 +132,13 @@ FILTERS = [   # (category, button label, on at start, colour)
     ("health", "Health", True, (160, 220, 100)),
     ("fights", "Fights", True, (255, 120, 60)),
     ("work", "Work", True, (200, 170, 110)),
+    ("building", "Building", True, (214, 186, 90)),
+    ("sharing", "Sharing", True, (120, 220, 200)),
     ("disasters", "Disasters", True, (255, 214, 120)),
     ("discoveries", "Discoveries", True, (140, 230, 120)),
     ("food", "Food", False, (120, 180, 255)),
     ("items", "Items", False, (190, 190, 200)),
+    ("calls", "Calls", False, (240, 240, 250)),
 ]
 DEATH_WORDS = {
     "starvation": "starved to death", "thirst": "died of thirst", "wolf": "was killed by a wolf",
@@ -182,6 +195,8 @@ class Viewer:
         self.people = {size: agent_sprites(size) for size in ZOOMS}
         self.beasts = {size: animal_sprites(size) for size in ZOOMS}
         self.hazards = {size: disaster_sprites(size) for size in ZOOMS}
+        self.structs = {size: structure_sprites(size) for size in ZOOMS}
+        self.deposit_imgs = {size: deposit_sprites(size) for size in ZOOMS}
         self.farm = {size: farm_sprites(size) for size in ZOOMS}
         self.shadows = {size: shadow_sprite(size) for size in ZOOMS}
         self.icons = {size: icon_sprites(size) for size in ZOOMS}
@@ -320,7 +335,8 @@ class Viewer:
         ash, fire_frames, flood = self.hazards[tile]
         crops, pile_img, _ = self.farm[tile]
         off = outline_offset(tile)
-        jobs, overlays, fires, piles = [], [], [], []
+        jobs, overlays, fires, piles, campfires = [], [], [], [], []
+        structs, deposits = self.structs[tile], self.deposit_imgs[tile]
         berry_tiles = []
         for y in range(first_y, last_y):
             py = HUD_HEIGHT + y * tile - int(self.cam_y)
@@ -339,6 +355,15 @@ class Viewer:
                         overlays.append((crops[stage], (px, py)))
                 elif w.berries[y, x]:
                     berry_tiles.append((px, py, int(w.berries[y, x]), bool(w.poison[y, x])))
+                if w.deposit[y, x] and w.deposit_amount[y, x] > 0:
+                    overlays.append((deposits[int(w.deposit[y, x])], (px, py)))
+                built = int(w.structure[y, x])
+                if built == CAMPFIRE:
+                    campfires.append((px, py, x + y))
+                elif built:
+                    image = structs[built]
+                    shift = off if image.get_width() > tile else 0
+                    piles.append((image, (px - shift, py - shift)))
                 if (x, y) in w.piles:
                     piles.append((pile_img, (px - off, py - off)))
                 if w.flood[y, x] > 0:
@@ -364,6 +389,13 @@ class Viewer:
                 self.draw_wolf_eyes(first_x, first_y, last_x, last_y)
         # Fire is drawn after the night layer so it glows in the dark
         self.screen.blits(fires, doreturn=False)
+        flames = structs[CAMPFIRE]
+        for px, py, k in campfires:
+            if alpha:   # a warm glow around campfires at night
+                glow = pygame.Surface((tile * 5, tile * 5), pygame.SRCALPHA)
+                pygame.draw.circle(glow, (255, 170, 60, int(55 * darkness)), (tile * 5 // 2, tile * 5 // 2), tile * 5 // 2)
+                self.screen.blit(glow, (px - 2 * tile, py - 2 * tile))
+            self.screen.blit(flames[(frame + k) % 2], (px - off, py - off))
         self.draw_weather()
         self.screen.set_clip(None)
 
@@ -453,15 +485,20 @@ class Viewer:
             kind = "child" if a.age[i] < adult_age else ("pregnant" if a.pregnant[i] else "adult")
             _, skin, hair = self.look(i)
             self.screen.blit(shadow, (px, py))
-            self.screen.blit(people[(int(a.sex[i]), kind, skin, hair)], (px - off, py - off))
+            self.screen.blit(people[(int(a.sex[i]), kind, skin, hair, int(a.tribe[i]))], (px - off, py - off))
             if a.weapon[i] != HANDS:
                 self.screen.blit(weapons[a.weapon[i]], (px - off, py - off))
         # Icons above heads for actions that just worked (drawn last so nothing covers them)
         if self.show_icons:
             for i in living:
+                name = None
                 if self.world.tick - a.did_tick[i] < ICON_TICKS and a.did[i] in ICON_FOR_ACTION:
+                    name = ICON_FOR_ACTION[a.did[i]]
+                elif a.sick[i] > 0 and (self.world.tick // 10) % 3 == 0:
+                    name = "sick"      # sick people show a green face now and then
+                if name:
                     px, py = self.to_screen(a.x[i], a.y[i])
-                    icon = icons[ICON_FOR_ACTION[a.did[i]]]
+                    icon = icons[name]
                     self.screen.blit(icon, (px + (tile - icon.get_width()) // 2, py - icon.get_height() + 2))
 
         # Red slashes where hits landed (they last a few ticks of game time)
@@ -517,16 +554,17 @@ class Viewer:
         if i is None:
             return
         a = self.sim.agents
-        height = 314 if a.alive[i] else 64
-        box = pygame.Rect(12, HUD_HEIGHT + MAP_H - height - 12, 480, height)
+        height = 356 if a.alive[i] else 64
+        box = pygame.Rect(12, HUD_HEIGHT + MAP_H - height - 12, 560, height)
         self.panel(box)
 
         sex = "male" if a.sex[i] == MALE else "female"
-        colour = MAN_COLOUR if a.sex[i] == MALE else WOMAN_COLOUR
+        colour = self.tribe_colour(i)
         name = self.font.render(self.name(i), False, colour)
         self.screen.blit(name, (box.x + 12, box.y + 10))
         years = a.age[i] / TICKS_PER_YEAR
-        info = self.small_font.render(f"{sex}, {years:.1f} years, generation {a.generation[i]}", False, MUTED)
+        info = self.small_font.render(f"{TRIBE_NAMES[a.tribe[i]]} tribe, {sex}, {years:.1f} years, "
+                                      f"gen {a.generation[i]}", False, MUTED)
         self.screen.blit(info, (box.x + 20 + name.get_width(), box.y + 12))
 
         if not a.alive[i]:
@@ -559,9 +597,15 @@ class Viewer:
         weapon = WEAPON_NAMES[a.weapon[i]]
         if a.weapon[i] != HANDS:
             weapon += f" ({a.weapon_uses[i]} uses left)"
-        lines.append(f"weapon: {weapon}")
-        carried = ", ".join(f"{a.inv[item][i]} {item}" for item in ITEMS if a.inv[item][i])
+        tools = [f"{TOOL_NAMES[getattr(a, t)[i]]} {t}" for t in ("pick", "sickle") if getattr(a, t)[i]]
+        if a.inv["pot"][i]:
+            tools.append(f"pot ({a.pot_water[i]} drinks)")
+        lines.append(f"weapon: {weapon}" + ("   tools: " + ", ".join(tools) if tools else ""))
+        carried = ", ".join(f"{a.inv[item][i]} {item}" for item in ALL_ITEMS if a.inv[item][i] and item != "pot")
+        if len(carried) > 62:
+            carried = carried[:60] + "..."
         lines.append(f"carrying: {carried or 'nothing'}")
+        lines.append(f"plan: build a {STRUCTURE_NAMES[BLUEPRINTS[a.blueprint[i]]]}")
         family = f"children: {a.children[i]}   people killed: {a.kills[i]}"
         mother = int(a.mother[i])
         if mother >= 0 and int(a.spawn_tick[i]) >= int(a.spawn_tick[mother]):
@@ -600,9 +644,13 @@ class Viewer:
         pygame.draw.rect(self.screen, HUD_BG, rect.inflate(8, 8))
         pygame.draw.rect(self.screen, BORDER, rect.inflate(8, 8), 2)
         self.screen.blit(self.minimap, rect)
+        w = self.world
+        for y, x in np.argwhere(w.structure > 0):
+            colour = (255, 150, 40) if w.structure[y, x] == CAMPFIRE else (230, 210, 170)
+            self.screen.fill(colour, (rect.x + int(x * MINIMAP_SCALE), rect.y + int(y * MINIMAP_SCALE), 2, 2))
         a = self.sim.agents
         for i in np.flatnonzero(a.alive):
-            colour = MAN_COLOUR if a.sex[i] == MALE else WOMAN_COLOUR
+            colour = self.tribe_colour(i)
             self.screen.fill(colour, (rect.x + int(a.x[i] * MINIMAP_SCALE), rect.y + int(a.y[i] * MINIMAP_SCALE), 2, 2))
         an = self.sim.animals
         for i in np.flatnonzero(an.alive & np.isin(an.species, (WOLF, BEAR))):
@@ -622,7 +670,12 @@ class Viewer:
                  ("pile", (200, 150, 100)), ("ash", (70, 66, 64)), ("flood", (90, 150, 230)),
                  ("fire", (255, 140, 40)), ("rabbit", (200, 180, 150)), ("deer", (180, 120, 60)),
                  ("wolf", (160, 160, 170)), ("bear", (100, 66, 40)), ("child", (255, 255, 255)),
-                 ("woman", (240, 100, 120)), ("man", (90, 130, 230))]
+                 ("woman", (240, 100, 120)), ("man", (90, 130, 230)),
+                 ("campfire", (255, 160, 40)), ("hut", (214, 186, 90)), ("stone wall", (160, 160, 170)),
+                 ("wooden fence", (140, 96, 52)), ("storage", (180, 130, 80)), ("bridge", (164, 116, 66)),
+                 ("well", (120, 160, 220)), ("watchtower", (200, 170, 110)), ("furnace", (220, 100, 60)),
+                 ("flint", (200, 206, 224)), ("clay", (178, 98, 64)), ("copper ore", (60, 180, 140)),
+                 ("tin ore", (230, 230, 240)), ("iron ore", (190, 80, 50))]
 
     def draw_eyes(self):
         """Debug panel: the selected agent's view, exactly as the brain receives it."""
@@ -752,13 +805,21 @@ class Viewer:
         people, _, _ = self.people[ZOOMS[2]]
         off = outline_offset(ZOOMS[2])
         col_w = (SIDEBAR_W - 32) // 3
-        for k, (key, count, label) in enumerate((((0, "adult", 1, 1), men, "men"),
-                                                 ((1, "adult", 0, 2), women, "women"),
-                                                 ((1, "child", 1, 0), kids, "children"))):
+        for k, (key, count, label) in enumerate((((0, "adult", 1, 1, 0), men, "men"),
+                                                 ((1, "adult", 0, 2, 0), women, "women"),
+                                                 ((1, "child", 1, 0, 0), kids, "children"))):
             cx = x0 + k * col_w
             self.screen.blit(people[key], (cx - off, y - off))
             self.screen.blit(self.font.render(str(count), False, HUD_TEXT), (cx + 38, y + 1))
             self.screen.blit(self.log_font.render(label, False, MUTED), (cx + 38, y + 20))
+        y += 46
+        col_w = (SIDEBAR_W - 32) // 4
+        for t in range(4):
+            cx = x0 + t * col_w
+            count = int((a.alive & (a.tribe == t)).sum())
+            self.screen.blit(people[(0, "adult", 1, 1, t)], (cx - off, y - off))
+            self.screen.blit(self.font.render(str(count), False, HUD_TEXT), (cx + 36, y + 1))
+            self.screen.blit(self.log_font.render(TRIBE_NAMES[t].lower(), False, TRIBE_COLOURS[t]), (cx + 36, y + 20))
         y += 46
         beasts = self.beasts[ZOOMS[2]]
         an = self.sim.animals
@@ -814,12 +875,16 @@ class Viewer:
             dot = dict((c, col) for c, _, _, col in FILTERS).get(cat, MUTED)
             pygame.draw.circle(self.screen, dot, (x0 + 86, y + 9), 4)
             tx = x0 + 96
+            right = sx + SIDEBAR_W - 8
             for text, colour in segments:
                 label = self.log_font.render(text, True, colour)
-                if tx + label.get_width() > sx + SIDEBAR_W - 8:
-                    break
+                while tx + label.get_width() > right and len(text) > 1:   # too long: shorten it
+                    text = text[:-2].rstrip() + "~"
+                    label = self.log_font.render(text, True, colour)
                 self.screen.blit(label, (tx, y))
                 tx += label.get_width()
+                if tx >= right - 4:
+                    break
             if who:
                 self.log_line_rects.append((pygame.Rect(sx, y, SIDEBAR_W, line_h), who[0]))
             y += line_h
@@ -834,10 +899,14 @@ class Viewer:
             return self.selected is not None and self.selected in who
         return True
 
+    def tribe_colour(self, i):
+        """A lighter version of the tribe's colour, easy to read on dark panels."""
+        r, g, b = TRIBE_COLOURS[self.sim.agents.tribe[i]]
+        return (min(255, r + 70), min(255, g + 70), min(255, b + 70))
+
     def person(self, i):
-        """A coloured name segment for the log."""
-        colour = MAN_COLOUR if self.sim.agents.sex[i] == MALE else WOMAN_COLOUR
-        return (self.name(i), colour)
+        """A name in the person's tribe colour, for the log."""
+        return (self.name(i), self.tribe_colour(i))
 
     def describe(self, kind, a, b):
         """Turn one event into coloured text pieces, and the agents involved."""
@@ -870,7 +939,8 @@ class Viewer:
         elif kind == "poisoned":
             pieces = [self.person(a), (" ate poisonous berries", (190, 120, 255))]
         elif kind == "got sick":
-            pieces = [self.person(a), (" got sick from pond water", (160, 220, 100))]
+            source = "raw meat" if b == "raw meat" else "pond water"
+            pieces = [self.person(a), (f" got sick from {source}", (160, 220, 100))]
         elif kind == "crafted":
             pieces = [self.person(a), (f" crafted {b}", (230, 200, 140))]
         elif kind == "planted":
@@ -887,6 +957,30 @@ class Viewer:
             pieces = [self.person(a), (f" drank {b}", text)]
         elif kind == "picked up":
             pieces = [self.person(a), (f" picked up {b}", text)]
+        elif kind == "caught sickness":
+            pieces = [self.person(a), (" caught a sickness", (160, 220, 100))]
+        elif kind == "fell ill":
+            pieces = [self.person(a), (" fell ill", (160, 220, 100))]
+        elif kind == "mined":
+            pieces = [self.person(a), (f" mined {b}", (200, 200, 220))]
+        elif kind == "built":
+            pieces = [self.person(a), (f" built a {b}", (230, 200, 110))]
+        elif kind == "repaired":
+            pieces = [self.person(a), (f" repaired a {b}", text)]
+        elif kind == "fed fire":
+            pieces = [self.person(a), (" added wood to a campfire", (255, 180, 90))]
+        elif kind == "destroyed":
+            pieces = [self.person(a), (f" destroyed a {b}", (255, 120, 90))]
+        elif kind == "gave":
+            other, item = b
+            pieces = [self.person(a), (" gave ", (120, 220, 200)), self.person(other), (f" {item}", (120, 220, 200))]
+            who = [a, other]
+        elif kind == "stored":
+            pieces = [self.person(a), (f" stored {b} things", (120, 220, 200))]
+        elif kind == "took from storage":
+            pieces = [self.person(a), (f" took {b} things from storage", (120, 220, 200))]
+        elif kind == "called":
+            pieces = [self.person(a), (f" made call {b}", text)]
         else:
             pieces = [self.person(a), (f" {kind} {b if b is not None else ''}", text)]
         return pieces, who

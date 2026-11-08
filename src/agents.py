@@ -10,7 +10,11 @@ from collections import Counter
 import numpy as np
 
 from src.world import (GRASS, FOREST, ROCK, RIVER, POND, CAVE, DEEP_WATER,
-                       CLIFF, FARMLAND, TICKS_PER_DAY, DAYS_PER_YEAR, CROP_GROW_TICKS)
+                       CLIFF, FARMLAND, TICKS_PER_DAY, DAYS_PER_YEAR, CROP_GROW_TICKS,
+                       NO_STRUCTURE, CAMPFIRE, HUT, STORAGE, BRIDGE, WELL, BLOCKS_PEOPLE)
+from src.tech import (TechMixin, HANDS, STICK, SHARP_STONE, SPEAR, FLINT_BLADE, COPPER_SPEAR,
+                      BRONZE_SPEAR, IRON_SPEAR, WEAPON_NAMES, WEAPON_DAMAGE, WEAPON_RANGE,
+                      WEAPON_USES, NO_TOOL, SICKLE_BONUS, BLUEPRINTS, NUM_CALLS)
 
 # ---------- actions ----------
 # Each tick every agent picks one of these numbers.
@@ -27,9 +31,14 @@ CRAFT = 9
 ATTACK_ANIMAL = 10
 ATTACK_PERSON = 11
 MATE = 12
-NUM_ACTIONS = 13
+GIVE = 13
+BUILD = 14
+NEXT_PLAN = 15
+CALL_1, CALL_2, CALL_3 = 16, 17, 18
+NUM_ACTIONS = 19
 ACTION_NAMES = ["rest", "up", "down", "left", "right", "eat", "drink", "pick up",
-                "plant", "craft", "attack animal", "attack person", "mate"]
+                "plant", "craft", "attack animal", "attack person", "mate",
+                "give", "build", "next plan", "call 1", "call 2", "call 3"]
 MOVES = {UP: (0, -1), DOWN: (0, 1), LEFT: (-1, 0), RIGHT: (1, 0)}
 
 MALE = 0
@@ -77,20 +86,27 @@ MIN_HUDDLE = 0.4          # ...down to at most 40% of normal
 COLD_DAMAGE = 0.4         # health lost per tick when warmth is empty
 
 # ---------- carrying ----------
-CARRY_LIMIT = {"berries": 5, "meat": 6, "seeds": 5, "sticks": 2, "stones": 2}
-ITEMS = list(CARRY_LIMIT)
+# ITEMS are the original five (their order matters to the brain's senses);
+# NEW_ITEMS were added in Stage 2. ALL_ITEMS is everything that can be carried.
+CARRY_LIMIT = {"berries": 5, "meat": 6, "seeds": 5, "sticks": 6, "stones": 4,
+               "cooked meat": 6, "flint": 3, "clay": 3, "copper ore": 3, "tin ore": 3,
+               "iron ore": 3, "copper": 2, "bronze": 2, "iron": 2, "pot": 1}
+ITEMS = ["berries", "meat", "seeds", "sticks", "stones"]
+NEW_ITEMS = ["cooked meat", "flint", "clay", "copper ore", "tin ore", "iron ore",
+             "copper", "bronze", "iron", "pot"]
+ALL_ITEMS = ITEMS + NEW_ITEMS
+FOOD_ITEMS = ("cooked meat", "meat", "berries")
+COOKED_FOOD = 30          # cooked meat is more filling...
+RAW_MEAT_SICK = 0.1       # ...and raw meat sometimes makes you sick
+COOKED_SPOIL_CHANCE = 0.001
+POT_SIPS = 3              # a full pot holds 3 drinks
 MEAT_FOOD = 15            # food from one piece of meat
 MEAT_SPOIL_CHANCE = 0.003 # per tick, carried meat may go bad (lose one piece)
 SEED_FROM_BERRY = 0.3     # chance eating a (safe) berry from a bush gives a seed
 SEED_FROM_CROP = 0.5      # chance eating a crop gives a seed
 CROP_FOOD = 25            # food from one serving of a ripe crop
 
-# ---------- weapons ----------
-HANDS, STICK, SHARP_STONE, SPEAR = 0, 1, 2, 3
-WEAPON_NAMES = ["hands", "stick", "sharp stone", "spear"]
-WEAPON_DAMAGE = [5, 9, 15, 25]
-WEAPON_RANGE = [1, 1, 1, 2]       # spears reach 2 tiles
-WEAPON_USES = [0, 20, 30, 40]     # hits before it breaks
+# ---------- weapons (the full list is in src/tech.py) ----------
 ATTACK_ENERGY = 0.5
 MISS_CHANCE = {0: 0.5, 1: 0.3}    # rabbits (0) and deer (1) often dodge
 
@@ -103,6 +119,10 @@ SICK_DAMAGE = 0.15        # health lost per tick while sick
 SICK_ENERGY = 0.1         # extra energy lost per tick while sick
 FLOOD_DAMAGE = 0.6        # health lost per tick standing in flood water (escapable)
 FIRE_DAMAGE = 20.0        # health lost per tick standing in fire
+CONTAGION = 0.02          # per tick, chance to catch sickness from each sick person next to you
+OUTBREAK_CHANCE = 0.0002  # per tick, chance that someone falls ill out of nowhere
+HUT_WARMTH = 0.6          # warmth gained per tick inside a hut (like a cave)
+HUT_REST_BONUS = 1.5      # resting in a hut restores 50% more energy
 LIFESPAN_YEARS = (3, 5)   # each agent's natural lifespan is somewhere in here
 INSTANT_DEATH = 1000.0
 
@@ -158,7 +178,15 @@ DEATH_CAUSES = ["alive", "starvation", "thirst", "wolf", "bear", "cold", "poison
 TICKS_PER_YEAR = TICKS_PER_DAY * DAYS_PER_YEAR
 
 
-class Agents:
+NUM_TRIBES = 4
+TRIBE_CAMP_RADIUS = 14    # each tribe starts gathered around a camp
+
+
+class Agents(TechMixin):
+    # action numbers, so the methods in src/tech.py can use them
+    CRAFT, ATTACK_PERSON, GIVE, BUILD, CALL_1 = CRAFT, ATTACK_PERSON, GIVE, BUILD, CALL_1
+    STORABLE = [item for item in ALL_ITEMS if item != "pot"]
+
     def __init__(self, world, count, rng, capacity=CAPACITY):
         self.world = world
         self.rng = rng
@@ -194,7 +222,14 @@ class Agents:
         self.children = np.zeros(n, dtype=np.int32)
 
         # Inventory: how many of each item every agent carries
-        self.inv = {item: np.zeros(n, dtype=np.int32) for item in ITEMS}
+        self.inv = {item: np.zeros(n, dtype=np.int32) for item in ALL_ITEMS}
+        self.pot_water = np.zeros(n, dtype=np.int32)   # drinks left in the pot
+        self.pick = np.zeros(n, dtype=np.int8)         # NO_TOOL, BRONZE_TOOL or IRON_TOOL
+        self.sickle = np.zeros(n, dtype=np.int8)
+        self.tribe = np.zeros(n, dtype=np.int8)
+        self.facing = np.zeros(n, dtype=np.int8)       # 0 up, 1 down, 2 left, 3 right
+        self.blueprint = np.zeros(n, dtype=np.int8)    # index into BLUEPRINTS
+        self.calling = np.zeros(n, dtype=np.int8)      # call made this tick (0 = none)
         self.inv_poison = np.zeros(n, dtype=np.int32)  # how many carried berries are poisonous
         self.weapon = np.zeros(n, dtype=np.int8)       # HANDS, STICK, SHARP_STONE or SPEAR
         self.weapon_uses = np.zeros(n, dtype=np.int32)
@@ -215,16 +250,28 @@ class Agents:
         self.death_tick = np.full(n, -1)
         self.spawn_tick = np.zeros(n, dtype=np.int64)  # when they appeared in this world
 
-        # The first people: young adults (1 to 2 years old) on random grass or forest,
-        # half male and half female, with slightly different genes
+        # The first people: young adults (1 to 2 years old), half male and half
+        # female, as 4 tribes, each gathered around a camp in its own quarter of the map
         land = np.argwhere(np.isin(world.terrain, (GRASS, FOREST)))
-        spots = land[rng.choice(len(land), count, replace=False)]
-        sexes = np.array([MALE, FEMALE] * (count // 2) + [MALE] * (count % 2))
-        rng.shuffle(sexes)
-        for k in range(count):
-            genes = {g: rng.normal(*GENE_START[g]) for g in GENE_NAMES}
-            age = int(rng.integers(TICKS_PER_YEAR, 2 * TICKS_PER_YEAR))
-            self.add(spots[k, 1], spots[k, 0], sexes[k], genes, age=age, food=rng.uniform(60, 100))
+        half = world.size // 2
+        for tribe in range(NUM_TRIBES):
+            qy, qx = (tribe // 2) * half, (tribe % 2) * half
+            mine = land[(land[:, 0] >= qy) & (land[:, 0] < qy + half) &
+                        (land[:, 1] >= qx) & (land[:, 1] < qx + half)]
+            members = count // NUM_TRIBES + (1 if tribe < count % NUM_TRIBES else 0)
+            camp = mine[rng.integers(len(mine))]
+            dist = np.abs(mine - camp).sum(axis=1)
+            nearby = mine[dist <= TRIBE_CAMP_RADIUS]
+            if len(nearby) < members:
+                nearby = mine[np.argsort(dist)[:members]]
+            spots = nearby[rng.choice(len(nearby), members, replace=False)]
+            sexes = np.array([MALE, FEMALE] * (members // 2) + [MALE] * (members % 2))
+            rng.shuffle(sexes)
+            for k in range(members):
+                genes = {g: rng.normal(*GENE_START[g]) for g in GENE_NAMES}
+                age = int(rng.integers(TICKS_PER_YEAR, 2 * TICKS_PER_YEAR))
+                self.add(spots[k, 1], spots[k, 0], sexes[k], genes, age=age,
+                         food=rng.uniform(60, 100), tribe=tribe)
 
     def free_slot(self):
         """A slot that never held anyone, or whose owner died over a day ago."""
@@ -232,7 +279,8 @@ class Agents:
         free = np.flatnonzero(~self.used | (self.used & old))
         return int(free[0]) if len(free) else None
 
-    def add(self, x, y, sex, genes, age=0, food=NEWBORN_FOOD, generation=0, mother=-1, father=-1):
+    def add(self, x, y, sex, genes, age=0, food=NEWBORN_FOOD, generation=0, mother=-1, father=-1,
+            tribe=0):
         """Put a new agent in a free slot. Returns its index (or None if full)."""
         i = self.free_slot()
         if i is None:
@@ -260,9 +308,15 @@ class Agents:
         self.partner[i] = -1
         self.rest_until[i] = 0
         self.children[i] = 0
-        for item in ITEMS:
+        for item in ALL_ITEMS:
             self.inv[item][i] = 0
         self.inv_poison[i] = 0
+        self.pot_water[i] = 0
+        self.pick[i] = self.sickle[i] = NO_TOOL
+        self.tribe[i] = tribe
+        self.facing[i] = rng.integers(4)
+        self.blueprint[i] = 0
+        self.calling[i] = 0
         self.weapon[i] = HANDS
         self.weapon_uses[i] = 0
         self.kills[i] = 0
@@ -297,6 +351,7 @@ class Agents:
         self.prev_health[:] = self.health
         self.new_parents = []
         self.events = []
+        self.calling[:] = 0
 
         # Exhausted agents (no energy) cannot move, so their move becomes rest
         tired = self.energy <= 0
@@ -312,9 +367,13 @@ class Agents:
         for action, (mx, my) in MOVES.items():
             chosen = moving & (a == action)
             dx[chosen], dy[chosen] = mx, my
+        # Trying to move also turns you to face that way (where "build" builds)
+        for action, face in ((UP, 0), (DOWN, 1), (LEFT, 2), (RIGHT, 3)):
+            self.facing[alive & (a == action)] = face
         new_x = np.clip(self.x + dx, 0, world.size - 1)
         new_y = np.clip(self.y + dy, 0, world.size - 1)
-        can_enter = WALKABLE[world.terrain[new_y, new_x]]
+        target = world.structure[new_y, new_x]
+        can_enter = (WALKABLE[world.terrain[new_y, new_x]] | (target == BRIDGE)) & ~BLOCKS_PEOPLE[target]
         self.x = np.where(can_enter, new_x, self.x)
         self.y = np.where(can_enter, new_y, self.y)
         move_cost = MOVE_ENERGY / self.genes["endurance"] * np.where(self.pregnant > 0, PREGNANT_COST, 1)
@@ -322,12 +381,14 @@ class Agents:
 
         # Walking into deep water or off a cliff is deadly
         here = world.terrain[self.y, self.x]
-        self.hurt(alive & (here == DEEP_WATER), INSTANT_DEATH, DROWNED)
+        bridged = world.structure[self.y, self.x] == BRIDGE
+        self.hurt(alive & (here == DEEP_WATER) & ~bridged, INSTANT_DEATH, DROWNED)
         self.hurt(alive & (here == CLIFF), INSTANT_DEATH, FELL)
 
         # ----- resting -----
         resting = alive & ((a == REST) | (np.isin(a, list(MOVES)) & tired))
-        self.energy[resting] += REST_ENERGY
+        in_hut = world.structure[self.y, self.x] == HUT
+        self.energy[resting] += REST_ENERGY * np.where(in_hut[resting], HUT_REST_BONUS, 1)
 
         # ----- the other actions, one agent at a time (in random order, so
         # nobody always gets the last berry or the first strike) -----
@@ -352,14 +413,23 @@ class Agents:
                 self.attack_person(i)
             elif act == MATE:
                 self.want_to_mate(i)
+            elif act == GIVE:
+                self.give(i)
+            elif act == BUILD:
+                self.build(i, animals)
+            elif act == NEXT_PLAN:
+                self.next_plan(i)
+            elif act in (CALL_1, CALL_2, CALL_3):
+                self.call(i, act - CALL_1 + 1)
         self.hearts = []
         self.find_partners()
         self.pregnancies()
 
-        # Carried meat slowly goes bad
-        has_meat = np.flatnonzero(alive & (self.inv["meat"] > 0))
-        spoils = has_meat[self.rng.random(len(has_meat)) < MEAT_SPOIL_CHANCE]
-        self.inv["meat"][spoils] -= 1
+        # Carried meat slowly goes bad (cooked meat lasts longer)
+        for item, chance in (("meat", MEAT_SPOIL_CHANCE), ("cooked meat", COOKED_SPOIL_CHANCE)):
+            has = np.flatnonzero(alive & (self.inv[item] > 0))
+            spoils = has[self.rng.random(len(has)) < chance]
+            self.inv[item][spoils] -= 1
 
         # ----- drinking (standing on or next to water) -----
         drinking = np.flatnonzero(alive & (a == DRINK))
@@ -370,8 +440,19 @@ class Agents:
                 tx = np.clip(self.x[drinking] + ox, 0, world.size - 1)
                 ty = np.clip(self.y[drinking] + oy, 0, world.size - 1)
                 tile = world.terrain[ty, tx]
-                near_water |= DRINKABLE[tile]
-                clean |= DRINKABLE[tile] & (tile != POND)
+                well = world.structure[ty, tx] == WELL
+                near_water |= DRINKABLE[tile] | well
+                clean |= (DRINKABLE[tile] & (tile != POND)) | well
+            # A pot is filled at clean water, and can be drunk from anywhere else
+            potted = drinking[clean & (self.inv["pot"][drinking] > 0)]
+            self.pot_water[potted] = POT_SIPS
+            from_pot = drinking[~near_water & (self.pot_water[drinking] > 0)]
+            self.pot_water[from_pot] -= 1
+            self.water[from_pot] += DRINK_WATER
+            self.did[from_pot] = DRINK
+            self.did_tick[from_pot] = world.tick
+            for k in from_pot:
+                self.log_event("drank", k, "from a pot")
             self.water[drinking[near_water]] += DRINK_WATER
             self.did[drinking[near_water]] = DRINK
             self.did_tick[drinking[near_water]] = world.tick
@@ -403,6 +484,7 @@ class Agents:
         self.hurt(ill, SICK_DAMAGE, SICKNESS)
         self.energy[ill] -= SICK_ENERGY
         self.sick[ill] -= 1
+        self.spread_disease(ill)
 
         # ----- cold -----
         self.update_warmth(alive, disasters)
@@ -420,6 +502,30 @@ class Agents:
         for stat in (self.food, self.water, self.energy, self.warmth):
             np.clip(stat, 0, MAX_STAT, out=stat)
         np.clip(self.health, None, MAX_STAT, out=self.health)
+
+    def spread_disease(self, ill):
+        """Sickness passes to people standing next to a sick person; and now
+        and then someone falls ill for no clear reason (an outbreak)."""
+        world = self.world
+        alive = self.alive
+        if ill.any():
+            grid = np.zeros((world.size + 2, world.size + 2), dtype=np.int32)
+            np.add.at(grid, (self.y[ill] + 1, self.x[ill] + 1), 1)
+            around = sum(grid[1 + oy:world.size + 1 + oy, 1 + ox:world.size + 1 + ox]
+                         for oy in (-1, 0, 1) for ox in (-1, 0, 1))
+            exposure = around[self.y, self.x]
+            healthy = np.flatnonzero(alive & (self.sick == 0) & (exposure > 0))
+            caught = healthy[self.rng.random(len(healthy)) < 1 - (1 - CONTAGION) ** exposure[healthy]]
+            self.sick[caught] = SICK_TICKS
+            for k in caught:
+                self.counts["caught sickness"] += 1
+                self.log_event("caught sickness", k)
+        if self.rng.random() < OUTBREAK_CHANCE:
+            healthy = np.flatnonzero(alive & (self.sick == 0))
+            if len(healthy):
+                k = int(self.rng.choice(healthy))
+                self.sick[k] = SICK_TICKS
+                self.log_event("fell ill", k)
 
     def food_use(self):
         """Food burned per tick: more for 'expensive' genes and for pregnancy."""
@@ -489,7 +595,7 @@ class Agents:
                 self.rng.normal(0, MUTATION[g])
         generation = max(self.generation[f], self.partner_generation[f]) + 1
         child = self.add(self.x[f], self.y[f], self.rng.integers(2), genes,
-                         generation=generation, mother=f, father=m)
+                         generation=generation, mother=f, father=m, tribe=int(self.tribe[f]))
         self.rest_until[f] = self.world.tick + MOTHER_REST_TICKS
         self.partner[f] = -1
         if child is not None:
@@ -527,7 +633,7 @@ class Agents:
         if w.berries[y, x] > 0:
             w.berries[y, x] -= 1
             if w.terrain[y, x] == FARMLAND:
-                self.food[i] += CROP_FOOD
+                self.food[i] += CROP_FOOD * (SICKLE_BONUS if self.sickle[i] else 1)
                 self.give_seed(i, SEED_FROM_CROP)
                 self.counts["ate crop"] += 1
                 self.log_event("ate", i, "a crop")
@@ -539,11 +645,19 @@ class Agents:
                 self.food[i] += BERRY_FOOD
                 self.give_seed(i, SEED_FROM_BERRY)
                 self.log_event("ate", i, "berries")
+        elif self.inv["cooked meat"][i] > 0:
+            self.inv["cooked meat"][i] -= 1
+            self.food[i] += COOKED_FOOD
+            self.counts["ate cooked meat"] += 1
+            self.log_event("ate", i, "cooked meat")
         elif self.inv["meat"][i] > 0:
             self.inv["meat"][i] -= 1
             self.food[i] += MEAT_FOOD
             self.counts["ate meat"] += 1
-            self.log_event("ate", i, "meat")
+            self.log_event("ate", i, "raw meat")
+            if self.rng.random() < RAW_MEAT_SICK and self.sick[i] == 0:
+                self.sick[i] = SICK_TICKS
+                self.log_event("got sick", i, "raw meat")
         elif self.inv["berries"][i] > 0:
             # Carried berries all look alike; a poisonous one may come out
             poisoned = self.rng.random() < self.inv_poison[i] / self.inv["berries"][i]
@@ -575,9 +689,9 @@ class Agents:
     def pick_up(self, i):
         """Pick up whatever is here, in this order: a pile of dropped things,
         a ripe crop, a berry, a stick (forest), a stone (next to rock)."""
-        before = (sum(int(self.inv[item][i]) for item in ITEMS), int(self.weapon[i]))
+        before = (sum(int(self.inv[item][i]) for item in ALL_ITEMS), int(self.weapon[i]))
         self._pick_up(i)
-        if (sum(int(self.inv[item][i]) for item in ITEMS), int(self.weapon[i])) != before:
+        if (sum(int(self.inv[item][i]) for item in ALL_ITEMS), int(self.weapon[i])) != before:
             self.success(i, PICK_UP)
 
     def _pick_up(self, i):
@@ -585,9 +699,12 @@ class Agents:
         x, y = int(self.x[i]), int(self.y[i])
         if (x, y) in w.piles:
             self.take_pile(i, x, y)
+        elif w.structure[y, x] == STORAGE and self.take_from_storage(i, x, y):
+            pass
         elif w.berries[y, x] > 0 and self.room(i, "berries") > 0:
             w.berries[y, x] -= 1
-            self.inv["berries"][i] += 1
+            bonus = SICKLE_BONUS if (w.terrain[y, x] == FARMLAND and self.sickle[i]) else 1
+            self.inv["berries"][i] = min(self.inv["berries"][i] + bonus, CARRY_LIMIT["berries"])
             if w.poison[y, x]:
                 self.inv_poison[i] += 1
             if w.terrain[y, x] == FARMLAND:
@@ -595,6 +712,8 @@ class Agents:
                 self.log_event("harvested", i)
             else:
                 self.log_event("picked up", i, "a berry")
+        elif self.gather_deposit(i):
+            pass
         elif w.terrain[y, x] == FOREST:
             if self.weapon[i] == HANDS:
                 self.weapon[i], self.weapon_uses[i] = STICK, WEAPON_USES[STICK]
@@ -604,6 +723,8 @@ class Agents:
                 self.inv["sticks"][i] += 1
                 self.counts["picked up stick"] += 1
                 self.log_event("picked up", i, "a stick")
+        elif self.mine_ore(i):
+            pass
         elif self.near_rock(i) and self.room(i, "stones") > 0:
             self.inv["stones"][i] += 1
             self.counts["picked up stone"] += 1
@@ -611,7 +732,7 @@ class Agents:
 
     def take_pile(self, i, x, y):
         pile = self.world.piles[(x, y)]
-        for item in ITEMS:
+        for item in ALL_ITEMS:
             n = min(pile.get(item, 0), self.room(i, item))
             self.inv[item][i] += n
             pile[item] = pile.get(item, 0) - n
@@ -619,7 +740,12 @@ class Agents:
                 bad = min(pile.get("poison", 0), n)
                 self.inv_poison[i] += bad
                 pile["poison"] = pile.get("poison", 0) - bad
-        if pile.get("weapon", HANDS) > self.weapon[i]:
+        for tool in ("pick", "sickle"):
+            if pile.get(tool, NO_TOOL) > getattr(self, tool)[i]:
+                getattr(self, tool)[i], pile[tool] = pile[tool], int(getattr(self, tool)[i])
+        if self.inv["pot"][i] and pile.get("pot_water", 0) > self.pot_water[i]:
+            self.pot_water[i] = pile.pop("pot_water")
+        if WEAPON_DAMAGE[pile.get("weapon", HANDS)] > WEAPON_DAMAGE[self.weapon[i]]:
             # Swap for the better weapon, leaving the old one behind
             old, old_uses = int(self.weapon[i]), int(self.weapon_uses[i])
             self.weapon[i], self.weapon_uses[i] = pile["weapon"], pile["weapon_uses"]
@@ -639,23 +765,6 @@ class Agents:
             self.counts["planted seed"] += 1
             self.log_event("planted", i)
             self.success(i, PLANT)
-
-    def craft(self, i):
-        """Sharp stone + stick = spear. A stone knocked against rock = sharp stone."""
-        if self.weapon[i] == SHARP_STONE and self.inv["sticks"][i] > 0:
-            self.inv["sticks"][i] -= 1
-            self.weapon[i], self.weapon_uses[i] = SPEAR, WEAPON_USES[SPEAR]
-            self.counts["crafted spear"] += 1
-            self.log_event("crafted", i, "a spear")
-            self.success(i, CRAFT)
-        elif self.weapon[i] < SHARP_STONE and self.inv["stones"][i] > 0 and self.near_rock(i):
-            self.inv["stones"][i] -= 1
-            if self.weapon[i] == STICK and self.room(i, "sticks") > 0:
-                self.inv["sticks"][i] += 1   # keep the stick for later
-            self.weapon[i], self.weapon_uses[i] = SHARP_STONE, WEAPON_USES[SHARP_STONE]
-            self.counts["crafted sharp stone"] += 1
-            self.log_event("crafted", i, "a sharp stone")
-            self.success(i, CRAFT)
 
     def strike(self, i):
         """Damage this agent deals now, and wear down its weapon."""
@@ -700,6 +809,9 @@ class Agents:
         targets = np.flatnonzero(self.alive & (self.health > 0) & (d <= reach))
         targets = targets[targets != i]
         if len(targets) == 0:
+            # nobody in reach: hit a structure next to you instead (if any)
+            if self.demolish(i, WEAPON_DAMAGE[self.weapon[i]] * self.genes["strength"][i]):
+                self.energy[i] -= ATTACK_ENERGY
             return
         j = self.rng.choice(targets[d[targets] == d[targets].min()])
         self.hurt(j, self.strike(i), KILLED_BY_PERSON)
@@ -734,6 +846,7 @@ class Agents:
 
         change = np.where(loss > 0, -loss * shelter / self.genes["hardiness"], -loss)
         change[here == CAVE] = CAVE_WARMTH
+        change[world.structure[self.y, self.x] == HUT] = HUT_WARMTH
         change[disasters.near_fire(self.x, self.y)] = FIRE_WARMTH
         self.warmth[alive] += change[alive]
 
@@ -755,7 +868,12 @@ class Agents:
 
     def drop_everything(self, i):
         """A dead agent leaves everything it carried on the ground."""
-        items = {item: int(self.inv[item][i]) for item in ITEMS if self.inv[item][i]}
+        items = {item: int(self.inv[item][i]) for item in ALL_ITEMS if self.inv[item][i]}
+        for tool in ("pick", "sickle"):
+            if getattr(self, tool)[i]:
+                items[tool] = int(getattr(self, tool)[i])
+        if self.pot_water[i]:
+            items["pot_water"] = int(self.pot_water[i])
         if self.inv_poison[i]:
             items["poison"] = int(self.inv_poison[i])
         if self.weapon[i] != HANDS:
@@ -763,7 +881,9 @@ class Agents:
             items["weapon_uses"] = int(self.weapon_uses[i])
         if items:
             self.world.drop(int(self.x[i]), int(self.y[i]), items)
-        for item in ITEMS:
+        for item in ALL_ITEMS:
             self.inv[item][i] = 0
         self.inv_poison[i] = 0
+        self.pot_water[i] = 0
+        self.pick[i] = self.sickle[i] = NO_TOOL
         self.weapon[i] = HANDS

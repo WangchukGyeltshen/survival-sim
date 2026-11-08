@@ -6,7 +6,7 @@ experience what a storm or a fire means.
 
 import numpy as np
 
-from src.world import GRASS, FOREST, RIVER, POND, FARMLAND, TICKS_PER_DAY
+from src.world import GRASS, FOREST, RIVER, POND, FARMLAND, TICKS_PER_DAY, CAMPFIRE
 
 # ----- storms -----
 STORM_CHANCE = 0.0008          # per tick (about one storm every 12 days)
@@ -23,6 +23,7 @@ SPREAD_FOREST = 0.03           # chance per tick fire jumps to a neighbouring fo
 SPREAD_GRASS = 0.006           # ... or grass tile
 BURNT_FOREST_TICKS = 10 * TICKS_PER_DAY   # ash before berries grow back
 BURNT_GRASS_TICKS = 3 * TICKS_PER_DAY
+CAMPFIRE_SPARK = 0.0003        # per tick, a campfire may set a neighbouring plant tile alight
 
 FLOODABLE = (GRASS, FOREST, FARMLAND)
 
@@ -85,10 +86,22 @@ class Disasters:
             if len(forest):
                 y, x = forest[self.rng.integers(len(forest))]
                 self.ignite(x, y, "A wildfire has started")
+        self.campfire_sparks()
         self.spread_fire()
 
         # ----- ash slowly recovers -----
         np.subtract(w.burnt, 1, out=w.burnt, where=w.burnt > 0)
+
+    def campfire_sparks(self):
+        w = self.world
+        if w.storm > 0:
+            return
+        fires = np.argwhere(w.structure == CAMPFIRE)
+        for y, x in fires[self.rng.random(len(fires)) < CAMPFIRE_SPARK * 4]:
+            dx, dy = [(1, 0), (-1, 0), (0, 1), (0, -1)][self.rng.integers(4)]
+            nx, ny = int(x + dx), int(y + dy)
+            if 0 <= nx < w.size and 0 <= ny < w.size and w.terrain[ny, nx] in (GRASS, FOREST):
+                self.ignite(nx, ny, "A campfire set the land alight")
 
     def ignite(self, x, y, message):
         w = self.world
@@ -133,7 +146,7 @@ class Disasters:
     def near_fire(self, x, y, distance=2):
         """True for positions within `distance` tiles of a fire (warm!)."""
         w = self.world
-        burning = w.fire > 0
+        burning = (w.fire > 0) | (w.structure == CAMPFIRE)
         if not burning.any():
             return np.zeros(len(x), dtype=bool)
         warm = burning.copy()

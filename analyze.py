@@ -175,6 +175,45 @@ def history_charts(folder, out):
     ax.legend()
     save(fig, out, "activities.png", charts)
 
+    if "tribe_0" in d:
+        from src.sprites import TRIBE_NAMES, TRIBE_COLOURS
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        for t in range(4):
+            ax.plot(days, d[f"tribe_{t}"], lw=2.4, label=f"{TRIBE_NAMES[t]} tribe",
+                    color=np.array(TRIBE_COLOURS[t]) / 255)
+        ax.set(title="Population of each tribe", xlabel="day", ylabel="people alive")
+        ax.legend()
+        save(fig, out, "tribes.png", charts)
+
+        built = [k for k in d if k.startswith("built_") and np.nansum(d[k]) > 0]
+        if built:
+            fig, ax = plt.subplots(figsize=(10, 4.5))
+            for k in built:
+                ax.plot(days, d[k], lw=2, label=k[6:].replace("_", " "))
+            ax.set(title="Structures standing in the world", xlabel="day", ylabel="number")
+            ax.legend(loc="center left", bbox_to_anchor=(1, 0.5), fontsize=9)
+            save(fig, out, "structures.png", charts)
+
+        armed = [k for k in d if k.startswith("armed_") and np.nansum(d[k]) > 0]
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        for k in armed:
+            ax.plot(days, d[k], lw=2, label=k[6:].replace("_", " "))
+        for k in ("pots", "picks", "sickles"):
+            if np.nansum(d[k]) > 0:
+                ax.plot(days, d[k], lw=2, ls="--", label=k)
+        ax.set(title="Technology: who carries which weapon and tools", xlabel="day", ylabel="people")
+        ax.legend(loc="center left", bbox_to_anchor=(1, 0.5), fontsize=9)
+        save(fig, out, "technology.png", charts)
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+        for key, colour in (("gave", "#2fb39b"), ("stored", "#7a9cc6"), ("called", "#999"),
+                            ("caught_sickness", "#7fbf3f"), ("destroyed", "#c0392b")):
+            if key in d:
+                ax.plot(days, smooth(d[key], window), lw=2, label=key.replace("_", " "), color=colour)
+        ax.set(title="Sharing, calls, disease spread and destruction per day", xlabel="day", ylabel="times per day")
+        ax.legend()
+        save(fig, out, "social.png", charts)
+
     fig, axes = plt.subplots(1, 4, figsize=(14, 3.6))
     for ax, g in zip(axes, GENE_NAMES):
         ax.plot(days, d[f"gene_{g}"], color="#8a5bd6", lw=2)

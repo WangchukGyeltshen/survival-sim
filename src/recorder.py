@@ -26,7 +26,8 @@ import numpy as np
 from src.agents import (NUM_ACTIONS, ACTION_NAMES, DEATH_CAUSES, GENE_NAMES, ADULT_AGE,
                         TICKS_PER_YEAR, MALE)
 from src.animals import RABBIT, DEER, WOLF, BEAR
-from src.world import TICKS_PER_DAY, FARMLAND
+from src.world import TICKS_PER_DAY, FARMLAND, STRUCTURE_NAMES
+from src.tech import WEAPON_NAMES
 from src.names import agent_name
 
 SNAPSHOT_DAYS = 10
@@ -90,6 +91,7 @@ class Recorder:
             "mother_id": self.person_id.get(mother, -1) if mother >= 0 else -1,
             "father_id": self.person_id.get(father, -1) if father >= 0 else -1,
             "generation": int(a.generation[i]),
+            "tribe": int(a.tribe[i]),
             "died_tick": -1, "cause": "", "children": 0, "kills": 0,
             **{f"gene_{g}": round(float(a.genes[g][i]), 3) for g in GENE_NAMES},
         })
@@ -137,6 +139,9 @@ class Recorder:
             if isinstance(other, (int, np.integer)) and kind in ("attacked", "killed", "conceived", "born"):
                 oid, oname = self.pid_name(other)
                 other_text = oid
+            elif kind == "gave":
+                oid, oname = self.pid_name(other[0])
+                other_text = f"{oid}:{other[1]}"
             else:
                 oname, other_text = "", other if other is not None else ""
             self.events.writerow([tick, tick // TICKS_PER_DAY, kind, pid, name, other_text, oname])
@@ -173,10 +178,21 @@ class Recorder:
             "berries": int(w.berries.sum()),
             "storm": int(w.storm > 0), "fire_tiles": int((w.fire > 0).sum()),
         }
+        for t in range(4):
+            row[f"tribe_{t}"] = int((alive & (a.tribe == t)).sum())
+        for k in range(1, len(STRUCTURE_NAMES)):
+            row[f"built_{STRUCTURE_NAMES[k].replace(' ', '_')}"] = int((w.structure == k).sum())
+        for k in range(1, len(WEAPON_NAMES)):
+            row[f"armed_{WEAPON_NAMES[k].replace(' ', '_')}"] = int((alive & (a.weapon == k)).sum())
+        row["pots"] = int((alive & (a.inv["pot"] > 0)).sum())
+        row["picks"] = int((alive & (a.pick > 0)).sum())
+        row["sickles"] = int((alive & (a.sickle > 0)).sum())
+        row["sick"] = int((alive & (a.sick > 0)).sum())
         for g in GENE_NAMES:
             row[f"gene_{g}"] = round(float(a.genes[g][alive].mean()), 4) if alive.any() else 0
         for kind in ("attacked", "killed", "hunted", "crafted", "planted", "harvested",
-                     "conceived", "poisoned", "got sick", "looted"):
+                     "conceived", "poisoned", "got sick", "looted", "built", "repaired", "destroyed",
+                     "gave", "stored", "took from storage", "called", "mined", "caught sickness", "fell ill"):
             row[kind.replace(" ", "_")] = self.day_counts[kind]
         for cause in DEATH_CAUSES[1:]:
             row[f"died_{cause.replace(' ', '_')}"] = self.day_counts[f"died_{cause}"]

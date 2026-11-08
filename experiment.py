@@ -25,6 +25,7 @@ import train
 from src.simulation import Simulation
 from src.observe import observe
 from src.recorder import Recorder
+from src.agents import NUM_ACTIONS
 
 
 class HistoryRun(train.Trainer):
@@ -108,7 +109,7 @@ class HistoryRun(train.Trainer):
             self.advantages(steps, bootstrap)
             learn_stats = self.learn(steps)
             self.update += 1
-            stats["curiosity"] = learn_stats["entropy"] / np.log(13)
+            stats["curiosity"] = learn_stats["entropy"] / np.log(NUM_ACTIONS)
             self.save()
             if self.viewer:
                 self.viewer.training_info = self.info_lines(stats)
